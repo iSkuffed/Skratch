@@ -6,6 +6,18 @@ mod style;
 
 use std::path::PathBuf;
 
+fn window_icon() -> eframe::egui::IconData {
+    let icon = image::load_from_memory(include_bytes!("../assets/icon.png"))
+        .expect("bundled icon decodes")
+        .into_rgba8();
+    let (width, height) = icon.dimensions();
+    eframe::egui::IconData {
+        rgba: icon.into_raw(),
+        width,
+        height,
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let data_dir = if let Some(path) = std::env::var_os("SKRATCH_DATA_DIR") {
         PathBuf::from(path)
@@ -20,6 +32,8 @@ fn main() -> anyhow::Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1360.0, 860.0])
             .with_min_inner_size([900.0, 600.0])
+            .with_app_id("skratch")
+            .with_icon(window_icon())
             .with_decorations(false)
             .with_transparent(true),
         renderer: eframe::Renderer::Glow,
