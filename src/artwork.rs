@@ -4,6 +4,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, SyncSender},
+    time::SystemTime,
 };
 
 type Loaded = (PathBuf, Option<(ColorImage, Color32, ColorImage)>);
@@ -16,6 +17,12 @@ pub struct Artwork {
     accents: HashMap<PathBuf, Color32>,
     glows: HashMap<PathBuf, TextureHandle>,
     order: VecDeque<PathBuf>,
+    /// File modification time when each cover was requested, to spot covers that changed on disk.
+    stamps: HashMap<PathBuf, Option<SystemTime>>,
+}
+
+fn modified(path: &Path) -> Option<SystemTime> {
+    path.metadata().and_then(|meta| meta.modified()).ok()
 }
 
 impl Artwork {
@@ -60,14 +67,29 @@ impl Artwork {
             accents: HashMap::new(),
             glows: HashMap::new(),
             order: VecDeque::new(),
+            stamps: HashMap::new(),
         }
     }
 
-    pub fn invalidate(&mut self) {
-        self.textures.clear();
-        self.accents.clear();
-        self.glows.clear();
-        self.order.clear();
+    /// Drops only the covers whose file changed, so a rescan does not blank the ones on screen.
+    pub fn invalidate_changed(&mut self) {
+        let changed: Vec<PathBuf> = self
+            .stamps
+            .iter()
+            .filter(|(path, stamp)| modified(path) != **stamp)
+            .map(|(path, _)| path.clone())
+            .collect();
+        for path in changed {
+            self.forget(&path);
+        }
+    }
+
+    fn forget(&mut self, path: &Path) {
+        self.textures.remove(path);
+        self.accents.remove(path);
+        self.glows.remove(path);
+        self.stamps.remove(path);
+        self.order.retain(|p| p != path);
     }
 
     pub fn drain(&mut self, ctx: &egui::Context) {
@@ -88,6 +110,7 @@ impl Artwork {
                 if let Some(old) = self.order.pop_front() {
                     self.textures.remove(&old);
                     self.glows.remove(&old);
+                    self.stamps.remove(&old);
                 }
             }
         }
@@ -96,10 +119,18 @@ impl Artwork {
     /// The decoded cover, or `None` while it loads or when the file is not an image.
     pub fn texture(&mut self, path: &Path) -> Option<TextureId> {
         if let Some(texture) = self.textures.get(path) {
+            // Most recently used goes last, so eviction never takes what is on screen.
+            if self.order.back().map(PathBuf::as_path) != Some(path) {
+                if let Some(at) = self.order.iter().position(|p| p == path) {
+                    let path = self.order.remove(at).expect("position is in range");
+                    self.order.push_back(path);
+                }
+            }
             return texture.as_ref().map(TextureHandle::id);
         }
         if !self.pending.contains(path) && self.requests.try_send(path.to_path_buf()).is_ok() {
             self.pending.insert(path.to_path_buf());
+            self.stamps.insert(path.to_path_buf(), modified(path));
         }
         None
     }
@@ -107,6 +138,11 @@ impl Artwork {
     /// The blurred backdrop for a cover that has already been loaded.
     pub fn glow(&self, path: &Path) -> Option<TextureId> {
         self.glows.get(path).map(TextureHandle::id)
+    }
+
+    /// True until the cover has been decoded (or found undecodable).
+    pub fn loading(&self, path: &Path) -> bool {
+        !self.textures.contains_key(path)
     }
 
     pub fn accent(&self, path: &Path) -> Option<Color32> {

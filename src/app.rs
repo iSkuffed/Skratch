@@ -30,14 +30,24 @@ const SEARCH_ID: &str = "library-search";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
+    Tracks,
     Albums,
     Artists,
-    Tracks,
     Queue,
     Playing,
     Downloads,
 }
 impl View {
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Tracks => "🎵",
+            Self::Albums => "💿",
+            Self::Artists => "👤",
+            Self::Queue => "☰",
+            Self::Playing => "▶",
+            Self::Downloads => "⬇",
+        }
+    }
     fn title(self) -> &'static str {
         match self {
             Self::Albums => "Albums",
@@ -171,6 +181,7 @@ pub struct Skratch {
     selected_group: Option<usize>,
     art: Artwork,
     busy: bool,
+    busy_since: Option<std::time::Instant>,
     messages: Vec<String>,
     editor: Option<Editor>,
     source_text: String,
@@ -265,7 +276,7 @@ impl Skratch {
             loaded: false,
             pending_seek: None,
             duration: 0.0,
-            view: View::Albums,
+            view: View::Tracks,
             sort: Sort::Album,
             descending: false,
             search: String::new(),
@@ -274,6 +285,7 @@ impl Skratch {
             selected_group: None,
             art: Artwork::new(cc.egui_ctx.clone()),
             busy: false,
+            busy_since: None,
             messages,
             editor: None,
             source_text: String::new(),
@@ -576,7 +588,10 @@ impl Skratch {
     fn poll(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.service.events.try_recv() {
             match event {
-                Event::Busy(value) => self.busy = value,
+                Event::Busy(value) => {
+                    self.busy = value;
+                    self.busy_since = value.then(std::time::Instant::now);
+                }
                 Event::Message(message) => self.message(message),
                 Event::Edited(id) => {
                     if self.editor.as_ref().is_some_and(|editor| editor.id == id) {
@@ -594,7 +609,7 @@ impl Skratch {
                 Event::Snapshot(sources, tracks) => {
                     self.sources = sources;
                     self.tracks = tracks;
-                    self.art.invalidate();
+                    self.art.invalidate_changed();
                     self.by_id = self
                         .tracks
                         .iter()
@@ -761,15 +776,15 @@ impl Skratch {
                 ui.add_space(8.0);
                 section(ui, "BROWSE", false);
                 for view in [
+                    View::Tracks,
                     View::Albums,
                     View::Artists,
-                    View::Tracks,
                     View::Queue,
                     View::Playing,
                     View::Downloads,
                 ] {
                     if ui
-                        .selectable_label(self.view == view, RichText::new(view.title()).size(16.0))
+                        .selectable_label(self.view == view, RichText::new(format!("{}  {}", view.icon(), view.title())).size(16.0))
                         .clicked()
                     {
                         self.view = view;
@@ -834,14 +849,20 @@ impl Skratch {
                 ui.label(
                     RichText::new(format!("{} tracks", self.tracks.len())).color(style::CREAM),
                 );
-                if self.busy {
+                // Quick background rescans would otherwise flash the spinner and shift the layout.
+                let busy_delay = std::time::Duration::from_millis(300);
+                let slow = self.busy_since.is_some_and(|t| t.elapsed() > busy_delay);
+                if self.busy && !slow {
+                    ui.ctx().request_repaint_after(busy_delay);
+                }
+                if slow {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label("Updating library...");
                     });
                 }
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("Refresh library"))
+                    .add_enabled(!slow, egui::Button::new("Refresh library"))
                     .clicked()
                 {
                     self.command(Command::Refresh);
@@ -872,11 +893,13 @@ impl Skratch {
         // 33 1/3 rpm
         self.spin = (self.spin + self.spin_speed * 3.49 * dt) % std::f32::consts::TAU;
         let target = match self.current() {
-            Some(t) => t
-                .artwork
-                .as_deref()
-                .and_then(|path| self.art.accent(path))
-                .unwrap_or_else(|| style::seed_color(&format!("{}{}", t.artist, t.album))),
+            Some(t) => match t.artwork.as_deref() {
+                // Hold the current colour while the cover loads instead of detouring via the seed hue.
+                Some(path) if self.art.loading(path) => self.accent,
+                path => path
+                    .and_then(|path| self.art.accent(path))
+                    .unwrap_or_else(|| style::seed_color(&format!("{}{}", t.artist, t.album))),
+            },
             None => style::ACCENT,
         };
         self.accent = self.accent.lerp_to_gamma(target, 1.0 - (-6.0 * dt).exp());
@@ -1929,7 +1952,7 @@ impl eframe::App for Skratch {
         self.poll_setup();
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
             if matches!(self.view, View::Downloads | View::Playing) {
-                self.view = View::Albums;
+                self.view = View::Tracks;
                 self.selected_group = None;
                 self.rebuild();
             }
