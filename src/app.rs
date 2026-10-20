@@ -15,7 +15,7 @@ use skratch::{
     tagparse::{self, Parsed},
 };
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{Arc, mpsc},
     time::{Duration, Instant},
@@ -90,7 +90,16 @@ struct Found {
     texture: Option<egui::TextureHandle>,
     failed: bool,
 }
+/// One album (or single) to find a cover for.
+struct CoverItem {
+    ids: Vec<i64>,
+    artist: String,
+    query: String,
+}
 struct CoverSearch {
+    /// Albums still waiting after the current one, and how many there were in total.
+    rest: VecDeque<CoverItem>,
+    total: usize,
     ids: Vec<i64>,
     artist: String,
     query: String,
@@ -99,6 +108,23 @@ struct CoverSearch {
     status: String,
     working: bool,
     rx: Option<mpsc::Receiver<CoverMsg>>,
+}
+impl CoverSearch {
+    /// Switches to `item` and searches for it right away.
+    fn begin(&mut self, item: CoverItem, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.rx = Some(spawn_cover_search(
+            item.artist.clone(),
+            item.query.clone(),
+            wake,
+        ));
+        self.ids = item.ids;
+        self.artist = item.artist;
+        self.query = item.query;
+        self.found.clear();
+        self.chosen = None;
+        self.working = true;
+        self.status = "Searching...".into();
+    }
 }
 
 enum Action {
@@ -1374,6 +1400,11 @@ impl Skratch {
                         for r in range { let i = self.groups[group_index].indices[r]; self.track_row(ui, i, None, r); }
                     });
                 } else {
+                    let missing: Vec<i64> = self.filtered.iter().map(|i| &self.tracks[*i]).filter(|t| t.artwork.is_none()).map(|t| t.id).collect();
+                    if self.view == View::Albums && !missing.is_empty() {
+                        let label = format!("Find covers for the {} tracks without one...", missing.len());
+                        if ui.button(label).clicked() { self.action = Some(Action::FindCover(missing)); }
+                    }
                     let columns = ((ui.available_width() / 180.0) as usize).max(1);
                     let rows = self.groups.len().div_ceil(columns);
                     egui::ScrollArea::vertical().id_salt("group-grid").show_rows(ui, 230.0, rows, |ui, range| {
@@ -1532,38 +1563,65 @@ impl Skratch {
         });
     }
 
-    /// Opens the cover search for `ids`, pre-filled from the first track, and searches right away.
-    fn open_cover(&mut self, ids: Vec<i64>) {
-        let Some(track) = ids
-            .first()
-            .and_then(|id| self.by_id.get(id))
+    /// Tracks of one album share a cover; tracks without an album each get their own.
+    fn cover_items(&self, ids: &[i64]) -> VecDeque<CoverItem> {
+        let mut items: VecDeque<CoverItem> = VecDeque::new();
+        let mut keys: Vec<Option<(String, String)>> = Vec::new();
+        for track in ids
+            .iter()
+            .filter_map(|id| self.by_id.get(id))
             .map(|i| &self.tracks[*i])
-        else {
+        {
+            let artist = display(&track.album_artist, &track.artist);
+            let key = (!track.album.is_empty())
+                .then(|| (artist.to_lowercase(), track.album.to_lowercase()));
+            if key.is_some()
+                && let Some(at) = keys.iter().position(|k| *k == key)
+            {
+                items[at].ids.push(track.id);
+                continue;
+            }
+            let query = if track.album.is_empty() {
+                track
+                    .title
+                    .split(['(', '['])
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned()
+            } else {
+                track.album.clone()
+            };
+            keys.push(key);
+            items.push_back(CoverItem {
+                ids: vec![track.id],
+                artist: artist.to_owned(),
+                query,
+            });
+        }
+        items
+    }
+
+    /// Opens the cover search for `ids`, one album at a time, and searches the first right away.
+    fn open_cover(&mut self, ids: Vec<i64>) {
+        let mut rest = self.cover_items(&ids);
+        let Some(first) = rest.pop_front() else {
             return;
         };
-        let query = if track.album.is_empty() {
-            track
-                .title
-                .split(['(', '['])
-                .next()
-                .unwrap_or_default()
-                .trim()
-                .to_owned()
-        } else {
-            track.album.clone()
-        };
-        let artist = track.artist.clone();
-        let rx = spawn_cover_search(artist.clone(), query.clone(), self.wake.clone());
-        self.cover = Some(CoverSearch {
-            ids,
-            artist,
-            query,
+        let mut cover = CoverSearch {
+            total: rest.len() + 1,
+            rest,
+            ids: Vec::new(),
+            artist: String::new(),
+            query: String::new(),
             found: Vec::new(),
             chosen: None,
-            status: "Searching...".into(),
-            working: true,
-            rx: Some(rx),
-        });
+            status: String::new(),
+            working: false,
+            rx: None,
+        };
+        cover.begin(first, self.wake.clone());
+        self.cover = Some(cover);
     }
 
     fn cover_window(&mut self, ctx: &egui::Context) {
@@ -1622,7 +1680,8 @@ impl Skratch {
         }
         let embed = &mut self.state.embed_cover;
         let accent = self.accent;
-        let (mut open, mut search, mut apply, mut cancel) = (true, false, false, false);
+        let (mut open, mut search, mut apply, mut cancel, mut skip) =
+            (true, false, false, false, false);
         egui::Window::new("Find cover online")
             .open(&mut open)
             .default_pos(ctx.content_rect().center() - egui::vec2(350.0, 250.0))
@@ -1630,7 +1689,8 @@ impl Skratch {
             .default_width(700.0)
             .show(ctx, |ui| {
                 let count = cover.ids.len();
-                ui.label(RichText::new(format!("Cover for {count} track{}", if count == 1 { "" } else { "s" })).small().weak());
+                let step = if cover.total > 1 { format!("Cover {} of {}  -  ", cover.total - cover.rest.len(), cover.total) } else { String::new() };
+                ui.label(RichText::new(format!("{step}{count} track{}. Double-click a cover to use it.", if count == 1 { "" } else { "s" })).small().weak());
                 ui.horizontal(|ui| {
                     ui.label("Artist");
                     let a = ui.add(egui::TextEdit::singleline(&mut cover.artist).desired_width(190.0));
@@ -1664,8 +1724,12 @@ impl Skratch {
                             let label = painter.layout(found.candidate.label.clone(), egui::FontId::proportional(12.0), style::CREAM, 124.0);
                             text.galley(rect.min + egui::vec2(4.0, 137.0), label, style::CREAM);
                             painter.text(rect.min + egui::vec2(4.0, 178.0), egui::Align2::LEFT_CENTER, found.candidate.source, egui::FontId::proportional(11.0), style::CREAM_DIM);
-                            if response.on_hover_text(&found.candidate.label).clicked() {
+                            let response = response.on_hover_text(&found.candidate.label);
+                            if response.clicked() {
                                 cover.chosen = Some(i);
+                            }
+                            if response.double_clicked() && !cover.working {
+                                apply = true;
                             }
                         }
                     });
@@ -1678,10 +1742,14 @@ impl Skratch {
                     "The cover stays in Skratch only. Your audio files are not touched, and it survives rescans."
                 }).small().weak());
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(cover.chosen.is_some() && !cover.working, egui::Button::new("Use this cover")).clicked() {
+                    let more = !cover.rest.is_empty();
+                    if ui.add_enabled(cover.chosen.is_some() && !cover.working, egui::Button::new(if more { "Use this cover, next" } else { "Use this cover" })).clicked() {
                         apply = true;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if more && ui.button("Skip").clicked() {
+                        skip = true;
+                    }
+                    if ui.button(if cover.total > 1 { "Close" } else { "Cancel" }).clicked() {
                         cancel = true;
                     }
                 });
@@ -1702,6 +1770,7 @@ impl Skratch {
         } else if apply && let Some(found) = cover.chosen.and_then(|i| cover.found.get(i)) {
             let url = found.candidate.full.clone();
             let (tx, rx) = mpsc::channel();
+            let wake = wake.clone();
             std::thread::spawn(move || {
                 let _ = tx.send(CoverMsg::Full(
                     online::fetch_image(&url).map_err(|e| format!("{e:#}")),
@@ -1712,12 +1781,19 @@ impl Skratch {
             cover.working = true;
             cover.status = "Downloading cover...".into();
         }
-        if let Some(bytes) = downloaded {
-            let (ids, embed) = (std::mem::take(&mut cover.ids), *embed);
+        let send = downloaded.map(|bytes| Command::SetCover(cover.ids.clone(), bytes, *embed));
+        let mut finished = !open;
+        if send.is_some() || skip {
+            match cover.rest.pop_front() {
+                Some(item) => cover.begin(item, wake),
+                None => finished = true,
+            }
+        }
+        if finished {
             self.cover = None;
-            self.command(Command::SetCover(ids, bytes, embed));
-        } else if !open {
-            self.cover = None;
+        }
+        if let Some(command) = send {
+            self.command(command);
         }
     }
 
