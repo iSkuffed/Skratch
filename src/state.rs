@@ -17,6 +17,8 @@ pub struct SavedState {
     pub tag_pattern: String,
     /// "Also save into the audio file" in the online cover search; off unless chosen.
     pub embed_cover: bool,
+    /// The first-run setup page has been shown (and dismissed) once.
+    pub setup_done: bool,
 }
 
 impl SavedState {

@@ -13,6 +13,7 @@ use skratch::{
     player::{Player, PlayerEvent},
     queue::Repeat,
     tagparse::{self, Parsed},
+    tools,
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -20,6 +21,8 @@ use std::{
     sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
+
+mod setup;
 
 const SEARCH_ID: &str = "library-search";
 
@@ -172,6 +175,9 @@ pub struct Skratch {
     last_save: Instant,
     last_desktop: Instant,
     downloader: Downloader,
+    data_dir: PathBuf,
+    tools: tools::Status,
+    setup: Option<setup::Setup>,
     download_url: String,
     download_status: String,
     download_log: std::collections::VecDeque<String>,
@@ -230,8 +236,9 @@ impl Skratch {
                 None
             }
         };
-        Self {
-            service: service::Service::start(data_dir, wake.clone()),
+        let setup = (!state.setup_done).then(|| setup::Setup::new(false));
+        let mut app = Self {
+            service: service::Service::start(data_dir.clone(), wake.clone()),
             tracks: Vec::new(),
             by_id: HashMap::new(),
             sources: Vec::new(),
@@ -240,6 +247,9 @@ impl Skratch {
             player: None,
             desktop,
             downloader: Downloader::new(wake.clone()),
+            data_dir,
+            tools: tools::Status::default(),
+            setup,
             download_url: String::new(),
             download_status: String::new(),
             download_log: std::collections::VecDeque::new(),
@@ -274,7 +284,9 @@ impl Skratch {
             spin: 0.0,
             spin_speed: 0.0,
             arm: 0.0,
-        }
+        };
+        app.refresh_tools();
+        app
     }
 
     fn current(&self) -> Option<&Track> {
@@ -715,6 +727,19 @@ impl Skratch {
         }
     }
 
+    fn pick_folder(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        self.folder_rx = Some(rx);
+        let wake = self.wake.clone();
+        std::thread::spawn(move || {
+            let folder = rfd::FileDialog::new()
+                .set_title("Add a music folder")
+                .pick_folder();
+            let _ = tx.send(folder);
+            wake();
+        });
+    }
+
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let frame = Frame::side_top_panel(ui.style())
             .fill(style::SIDEBAR)
@@ -777,16 +802,7 @@ impl Skratch {
                     )
                     .clicked()
                 {
-                    let (tx, rx) = mpsc::channel();
-                    self.folder_rx = Some(rx);
-                    let wake = self.wake.clone();
-                    std::thread::spawn(move || {
-                        let folder = rfd::FileDialog::new()
-                            .set_title("Add a music folder")
-                            .pick_folder();
-                        let _ = tx.send(folder);
-                        wake();
-                    });
+                    self.pick_folder();
                 }
                 ui.add(
                     egui::TextEdit::singleline(&mut self.source_text)
@@ -828,6 +844,9 @@ impl Skratch {
                 section(ui, "SETTINGS", true);
                 ui.checkbox(&mut self.state.double_click, "Double-click to play")
                     .on_hover_text("Off: a single click starts a track.");
+                if ui.button("Run setup again").clicked() {
+                    self.open_setup(false);
+                }
             });
     }
 
@@ -1454,6 +1473,15 @@ impl Skratch {
         ui.add_space(10.0);
         ui.heading("Downloads");
         ui.add_space(12.0);
+        if !self.tools.downloads_ready() {
+            ui.horizontal(|ui| {
+                ui.colored_label(self.accent, "Downloading needs yt-dlp and ffmpeg.");
+                if ui.button("Set up downloads...").clicked() {
+                    self.open_setup(true);
+                }
+            });
+            ui.add_space(8.0);
+        }
         ui.label("Link");
         ui.add(
             egui::TextEdit::singleline(&mut self.download_url)
@@ -1510,6 +1538,7 @@ impl Skratch {
             if ui
                 .add_enabled(
                     !running
+                        && self.tools.downloads_ready()
                         && self.state.download_source.is_some()
                         && !self.download_url.trim().is_empty(),
                     egui::Button::new("Download audio"),
@@ -1844,6 +1873,7 @@ impl Skratch {
 impl eframe::App for Skratch {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.poll(ctx);
+        self.poll_setup();
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
             if self.view == View::Downloads {
                 self.view = View::Albums;
@@ -1889,6 +1919,7 @@ impl eframe::App for Skratch {
         self.edit_window(ctx);
         self.cover_window(ctx);
         self.fill_window(ctx);
+        self.setup_window(ctx);
         style::resize_edges(ctx);
         if let Some(action) = self.action.take() {
             self.perform(action);

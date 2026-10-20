@@ -18,16 +18,7 @@ Skratch has a vinyl theme: a spinning record with a tonearm in the player bar, g
 
 ## Install
 
-You need `mpv`. For the Downloads tab you also need `yt-dlp` and `ffmpeg`.
-
-```sh
-# Fedora
-sudo dnf install mpv yt-dlp ffmpeg
-# Debian / Ubuntu
-sudo apt install mpv yt-dlp ffmpeg
-```
-
-Then build from source (Rust toolchain, a C compiler, `pkg-config` and D-Bus headers are required; on Fedora that's `gcc pkgconf-pkg-config dbus-devel`, on Debian/Ubuntu `build-essential pkg-config libdbus-1-dev`):
+Build from source (Rust toolchain, a C compiler, `pkg-config` and D-Bus headers are required; on Fedora that's `gcc pkgconf-pkg-config dbus-devel`, on Debian/Ubuntu `build-essential pkg-config libdbus-1-dev`):
 
 ```sh
 git clone https://github.com/iSkuffed/Skratch
@@ -36,13 +27,19 @@ cargo build --release
 ./target/release/skratch
 ```
 
-Pick a music folder in the sidebar, or paste its path. Skratch remembers it.
+On first launch a welcome page checks what you already have and sets up the rest:
+
+- **Music folder:** pick where your music lives.
+- **mpv** (plays the audio): if it's missing, "Install mpv" runs your package manager (dnf, apt, pacman or zypper) through the desktop's password prompt, so Skratch never sees your password. The exact command is shown too, if you'd rather run it yourself.
+- **Downloads (optional):** one checkbox fetches `yt-dlp` (about 40 MB) and `ffmpeg` (about 70 MB, 220 MB unpacked) from their official releases, checks them against the published checksums and keeps them in Skratch's own folder. Nothing is installed system-wide, and tools already on your system are used as they are.
+
+You can reopen it any time with "Run setup again" in the sidebar.
 
 Prebuilt downloads aren't published yet.
 
 ## Where things live
 
-The library database, cached artwork and player state are in `~/.local/share/skratch`. Set `SKRATCH_DATA_DIR=/some/path` to use a separate library, which is handy for testing.
+The library database, cached artwork, player state and any downloaded tools (`bin/`, `ffmpeg/`) are in `~/.local/share/skratch`. Set `SKRATCH_DATA_DIR=/some/path` to use a separate library, which is handy for testing.
 
 ## Development
 
@@ -66,6 +63,7 @@ Tests use mpv's null audio output and generated temporary media, never your musi
 | `src/online.rs` | Cover search (iTunes, MusicBrainz, Cover Art Archive) |
 | `src/player.rs` | Headless mpv child process and JSON IPC |
 | `src/download.rs` | yt-dlp jobs, progress, cancellation |
+| `src/tools.rs` | Finds and installs mpv, yt-dlp and ffmpeg (setup page) |
 | `src/service.rs` | Background scans and folder watching |
 | `src/media.rs`, `src/queue.rs` | MPRIS, playback order |
 

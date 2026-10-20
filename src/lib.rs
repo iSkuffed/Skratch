@@ -6,3 +6,4 @@ pub mod online;
 pub mod player;
 pub mod queue;
 pub mod tagparse;
+pub mod tools;

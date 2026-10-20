@@ -52,6 +52,7 @@ pub struct Downloader {
     control: Arc<JobControl>,
     running: Arc<AtomicBool>,
     program: PathBuf,
+    ffmpeg_dir: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -89,7 +90,14 @@ impl Downloader {
             control: Arc::new(JobControl::default()),
             running: Arc::new(AtomicBool::new(false)),
             program,
+            ffmpeg_dir: None,
         }
+    }
+
+    /// Which yt-dlp to run, and where to find ffmpeg when it is not on PATH.
+    pub fn set_tools(&mut self, program: PathBuf, ffmpeg_dir: Option<PathBuf>) {
+        self.program = program;
+        self.ffmpeg_dir = ffmpeg_dir;
     }
 
     pub fn start(&mut self, request: DownloadRequest) -> Result<()> {
@@ -113,12 +121,13 @@ impl Downloader {
         };
         let running = Arc::clone(&self.running);
         let program = self.program.clone();
+        let ffmpeg_dir = self.ffmpeg_dir.clone();
         let worker = thread::Builder::new()
             .name("skratch-download".to_owned())
             .spawn(move || {
                 let _running = RunningGuard(running);
                 let result = run_download(
-                    program,
+                    (program, ffmpeg_dir),
                     request,
                     url,
                     destination,
@@ -273,7 +282,7 @@ fn validate_request(request: &DownloadRequest) -> Result<(Url, PathBuf)> {
 }
 
 fn run_download(
-    program: PathBuf,
+    (program, ffmpeg_dir): (PathBuf, Option<PathBuf>),
     request: DownloadRequest,
     url: Url,
     destination: PathBuf,
@@ -286,7 +295,12 @@ fn run_download(
     }
     let stage_path =
         fs::canonicalize(stage.path()).context("resolve temporary download directory")?;
-    let args = command_args(&request, &url, &stage_path);
+    let mut args = command_args(&request, &url, &stage_path);
+    if let Some(dir) = ffmpeg_dir {
+        // before the `--` that ends the options
+        let end = args.len() - 2;
+        args.splice(end..end, ["--ffmpeg-location".into(), dir.into_os_string()]);
+    }
     let mut command = Command::new(&program);
     command
         .args(args)
