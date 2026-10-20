@@ -196,6 +196,8 @@ pub struct Skratch {
     spin_speed: f32,
     arm: f32,
     reactive: Reactive,
+    /// The track the Now playing list was last scrolled to, so it follows track changes.
+    listed: Option<i64>,
 }
 
 impl Skratch {
@@ -290,6 +292,7 @@ impl Skratch {
             spin_speed: 0.0,
             arm: 0.0,
             reactive: Reactive::default(),
+            listed: None,
         };
         app.refresh_tools();
         app

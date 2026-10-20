@@ -67,6 +67,62 @@ fn tokens(pattern: &str) -> Option<Vec<Token<'_>>> {
     (!adjacent && out.iter().any(|t| matches!(t, Token::Field(_)))).then_some(out)
 }
 
+/// Words that mark a bracketed tag as downloader clutter, e.g. `(Official Music Video)`.
+const NOISE: [&str; 11] = [
+    "official",
+    "lyrics",
+    "lyric",
+    "audio",
+    "video",
+    "visualizer",
+    "visualiser",
+    "hd",
+    "hq",
+    "4k",
+    "quality",
+];
+
+/// A YouTube video id such as `kQgCxZ4LbUQ`: 11 URL-safe characters with a digit or capitals.
+fn is_video_id(text: &str) -> bool {
+    text.len() == 11
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && (text.chars().any(|c| c.is_ascii_digit())
+            || text.chars().filter(char::is_ascii_uppercase).count() >= 2)
+}
+
+/// Drops what downloaders leave in file names: a trailing `[video id]` and tags like
+/// `(Official Video)` or `[Lyrics]`. Other brackets, such as `(Remix)`, stay.
+pub fn strip_noise(stem: &str) -> String {
+    let mut out = String::new();
+    let mut rest = stem;
+    while let Some(open) = rest.find(['(', '[']) {
+        let close = if rest[open..].starts_with('(') {
+            ')'
+        } else {
+            ']'
+        };
+        let Some(len) = rest[open..].find(close) else {
+            break;
+        };
+        let inner = &rest[open + 1..open + len];
+        let after = &rest[open + len + 1..];
+        let noise = (is_video_id(inner) && after.trim().is_empty())
+            || inner
+                .to_lowercase()
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|word| NOISE.contains(&word));
+        out.push_str(&rest[..open]);
+        if !noise {
+            out.push_str(&rest[open..open + len + 1]);
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Pulls a featured-artist credit out of `stem`, returning the stem without it.
 fn split_feat(stem: &str) -> (String, Option<String>) {
     const MARKERS: [&str; 6] = ["ft.", "feat.", "featuring", "ft ", "feat ", "with "];
@@ -114,7 +170,7 @@ fn split_feat(stem: &str) -> (String, Option<String>) {
 /// `None` when the pattern is invalid, the stem does not fit it, or a field comes out empty.
 pub fn parse(pattern: &str, stem: &str) -> Option<Parsed> {
     let tokens = tokens(pattern)?;
-    let (stem, feat) = split_feat(stem);
+    let (stem, feat) = split_feat(&strip_noise(stem));
     let mut rest = stem.as_str();
     let mut parsed = Parsed::default();
     let mut iter = tokens.iter().peekable();
@@ -209,6 +265,37 @@ mod tests {
             p("{artist} - {title}", "Drift - Soft"),
             pair("Drift", "Soft")
         );
+    }
+
+    #[test]
+    fn downloader_clutter_is_dropped_but_real_brackets_stay() {
+        assert_eq!(
+            p("{artist} - {title}", "Juice Wrld - Darkness [kQgCxZ4LbUQ]"),
+            pair("Juice Wrld", "Darkness")
+        );
+        assert_eq!(
+            p(
+                "{artist} - {title}",
+                "Juice WRLD - Glo\u{2019}d Up (Official Music Video)"
+            ),
+            pair("Juice WRLD", "Glo\u{2019}d Up")
+        );
+        assert_eq!(
+            p(
+                "{artist} - {title}",
+                "Juice WRLD -  Back On It (Studio Cut) [nqm4f3JFe8Y]"
+            ),
+            pair("Juice WRLD", "Back On It (Studio Cut)")
+        );
+        assert_eq!(
+            p(
+                "{artist} - {title}",
+                "Rod Wave - Heart (Remix) [Official Audio]"
+            ),
+            pair("Rod Wave", "Heart (Remix)")
+        );
+        // not an id: wrong length, no digits or capitals
+        assert_eq!(strip_noise("A - B [Interlude]"), "A - B [Interlude]");
     }
 
     #[test]

@@ -3,6 +3,27 @@ use serde::{Deserialize, Serialize};
 use skratch::queue::Queue;
 use std::{fs, io::Write, path::Path};
 
+/// What the right-hand side of the Now playing page shows.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NowPanel {
+    #[default]
+    Details,
+    UpNext,
+    Library,
+}
+
+impl NowPanel {
+    pub const ALL: [Self; 3] = [Self::Details, Self::UpNext, Self::Library];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Details => "Details",
+            Self::UpNext => "Up next",
+            Self::Library => "Library",
+        }
+    }
+}
+
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SavedState {
@@ -19,6 +40,7 @@ pub struct SavedState {
     pub embed_cover: bool,
     /// The first-run setup page has been shown (and dismissed) once.
     pub setup_done: bool,
+    pub now_panel: NowPanel,
 }
 
 impl SavedState {

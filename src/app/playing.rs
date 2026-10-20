@@ -1,6 +1,7 @@
-//! The "Now playing" page: a big spinning record next to the track details.
+//! The "Now playing" page: a big spinning record next to a panel the user can switch
+//! between the track details, the queue and the whole library.
 use super::{Action, Skratch, display};
-use crate::style;
+use crate::{state::NowPanel, style};
 use eframe::egui::{self, RichText, Sense, pos2, vec2};
 
 impl Skratch {
@@ -9,7 +10,8 @@ impl Skratch {
             let Some(track) = self.current().cloned() else {
                 ui.add_space(24.0);
                 ui.heading("Nothing playing");
-                ui.label("Pick a track and it shows up here.");
+                ui.label("Pick a track below.");
+                self.panel_list(ui, NowPanel::Library);
                 return;
             };
             let art = track
@@ -81,41 +83,125 @@ impl Skratch {
             );
 
             let left = centre.x + r * 1.9 + 30.0;
-            let text = egui::Rect::from_min_max(
-                pos2(left, centre.y - r),
-                pos2(area.right() - 30.0, centre.y + r),
+            let panel = egui::Rect::from_min_max(
+                pos2(left, area.top() + 14.0),
+                pos2(area.right() - 24.0, area.bottom() - 14.0),
             );
-            ui.scope_builder(egui::UiBuilder::new().max_rect(text), |ui| {
-                ui.set_width(text.width());
-                ui.add_space(r * 0.55);
-                ui.label(
-                    RichText::new("NOW PLAYING")
-                        .size(11.0)
-                        .strong()
-                        .color(style::CREAM_DIM),
-                );
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(&track.title)
-                        .size(36.0)
-                        .strong()
-                        .color(style::CREAM),
-                );
-                ui.label(
-                    RichText::new(display(&track.artist, "Unknown artist"))
-                        .size(22.0)
-                        .color(self.accent),
-                );
-                let year = track.year.map(|y| format!("  ·  {y}")).unwrap_or_default();
-                if !track.album.is_empty() || !year.is_empty() {
-                    ui.add_space(6.0);
-                    ui.label(
-                        RichText::new(format!("{}{year}", track.album))
-                            .size(16.0)
-                            .color(style::CREAM_DIM),
-                    );
-                }
+            ui.scope_builder(egui::UiBuilder::new().max_rect(panel), |ui| {
+                ui.set_width(panel.width());
+                self.panel_ui(ui, &track);
             });
+        });
+    }
+
+    /// The switchable right-hand panel: a heading and drop-down, then the chosen content.
+    fn panel_ui(&mut self, ui: &mut egui::Ui, track: &skratch::model::Track) {
+        let panel = self.state.now_panel;
+        ui.horizontal(|ui| {
+            let heading = match panel {
+                NowPanel::Details => "NOW PLAYING",
+                NowPanel::UpNext => "UP NEXT",
+                NowPanel::Library => "LIBRARY",
+            };
+            ui.label(
+                RichText::new(heading)
+                    .size(11.0)
+                    .strong()
+                    .color(style::CREAM_DIM),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                egui::ComboBox::from_id_salt("now-panel")
+                    .selected_text(panel.title())
+                    .width(110.0)
+                    .show_ui(ui, |ui| {
+                        for choice in NowPanel::ALL {
+                            if ui
+                                .selectable_value(&mut self.state.now_panel, choice, choice.title())
+                                .clicked()
+                            {
+                                self.listed = None;
+                            }
+                        }
+                    });
+            });
+        });
+        ui.add_space(4.0);
+        if panel == NowPanel::Details {
+            self.details(ui, track);
+        } else {
+            self.panel_list(ui, panel);
+        }
+    }
+
+    fn details(&mut self, ui: &mut egui::Ui, track: &skratch::model::Track) {
+        ui.add_space(((ui.available_height() - 150.0) / 2.0).max(0.0));
+        ui.label(
+            RichText::new(&track.title)
+                .size(36.0)
+                .strong()
+                .color(style::CREAM),
+        );
+        ui.label(
+            RichText::new(display(&track.artist, "Unknown artist"))
+                .size(22.0)
+                .color(self.accent),
+        );
+        let album = [Some(track.album.clone()), track.year.map(|y| y.to_string())]
+            .into_iter()
+            .flatten()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("  ·  ");
+        if !album.is_empty() {
+            ui.add_space(6.0);
+            ui.label(RichText::new(album).size(16.0).color(style::CREAM_DIM));
+        }
+    }
+
+    /// The queue or the whole library as clickable rows, scrolled to the playing track.
+    fn panel_list(&mut self, ui: &mut egui::Ui, panel: NowPanel) {
+        // (track index, position in the queue, position among the visible tracks)
+        let rows: Vec<(usize, Option<usize>, usize)> = if panel == NowPanel::UpNext {
+            self.state
+                .queue
+                .ids
+                .iter()
+                .enumerate()
+                .filter_map(|(q, id)| self.by_id.get(id).map(|i| (*i, Some(q), 0)))
+                .collect()
+        } else {
+            let search = ui.add(
+                egui::TextEdit::singleline(&mut self.search)
+                    .hint_text("Search library")
+                    .desired_width(f32::INFINITY),
+            );
+            if search.changed() {
+                self.rebuild();
+            }
+            self.filtered
+                .iter()
+                .enumerate()
+                .map(|(r, i)| (*i, None, r))
+                .collect()
+        };
+        let current = self.state.queue.current_id();
+        let mut area = egui::ScrollArea::vertical()
+            .id_salt(("now-list", panel as u8))
+            .auto_shrink(false);
+        if self.listed != current {
+            self.listed = current;
+            let at = rows
+                .iter()
+                .position(|(i, ..)| Some(self.tracks[*i].id) == current);
+            if let Some(at) = at {
+                area = area.vertical_scroll_offset((at as f32 * 40.0 - 80.0).max(0.0));
+            }
+        }
+        area.show_rows(ui, 40.0, rows.len(), |ui, range| {
+            for r in range {
+                let (index, queue, context) = rows[r];
+                self.track_row(ui, index, queue, context);
+            }
         });
     }
 }
