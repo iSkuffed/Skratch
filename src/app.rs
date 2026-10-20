@@ -914,6 +914,10 @@ impl Skratch {
             .as_ref()
             .and_then(|t| t.artwork.as_deref())
             .and_then(|path| self.art.texture(path));
+        let glow = track
+            .as_ref()
+            .and_then(|t| t.artwork.as_deref())
+            .and_then(|path| self.art.glow(path));
         let label = track.as_ref().map_or(accent, |t| {
             style::seed_color(&format!("{}{}", t.artist, t.album))
         });
@@ -930,6 +934,26 @@ impl Skratch {
             .exact_height(136.0)
             .frame(frame)
             .show_inside(ui, |ui| {
+                // the playing cover, shrunk and stretched over the whole bar
+                let bar = ui.max_rect().expand2(egui::vec2(18.0, 10.0));
+                let round = CornerRadius {
+                    nw: 0,
+                    ne: 0,
+                    sw: radius,
+                    se: radius,
+                };
+                match glow {
+                    Some(glow) => egui::Image::new((glow, bar.size()))
+                        .tint(Color32::from_white_alpha(70))
+                        .corner_radius(round)
+                        .paint_at(ui, bar),
+                    // no cover: wash the bar with the track's own colour instead
+                    None if track.is_some() => {
+                        ui.painter()
+                            .rect_filled(bar, round, label.gamma_multiply(0.08));
+                    }
+                    None => {}
+                }
                 ui.horizontal(|ui| {
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(160.0, 112.0), egui::Sense::hover());

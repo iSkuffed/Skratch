@@ -6,7 +6,7 @@ use std::{
     sync::mpsc::{self, Receiver, SyncSender},
 };
 
-type Loaded = (PathBuf, Option<(ColorImage, Color32)>);
+type Loaded = (PathBuf, Option<(ColorImage, Color32, ColorImage)>);
 
 pub struct Artwork {
     requests: SyncSender<PathBuf>,
@@ -14,6 +14,7 @@ pub struct Artwork {
     pending: HashSet<PathBuf>,
     textures: HashMap<PathBuf, Option<TextureHandle>>,
     accents: HashMap<PathBuf, Color32>,
+    glows: HashMap<PathBuf, TextureHandle>,
     order: VecDeque<PathBuf>,
 }
 
@@ -27,13 +28,19 @@ impl Artwork {
                     .ok()
                     .and_then(|reader| reader.decode().ok())
                     .map(|image| {
-                        let image = image.thumbnail(256, 256).to_rgba8();
+                        let image = image.thumbnail(256, 256);
+                        // a tiny copy; stretched out with linear filtering it becomes a soft glow
+                        let glow = image
+                            .resize_exact(16, 16, image::imageops::FilterType::Triangle)
+                            .to_rgba8();
+                        let glow = ColorImage::from_rgba_unmultiplied([16, 16], glow.as_raw());
+                        let image = image.to_rgba8();
                         let image = ColorImage::from_rgba_unmultiplied(
                             [image.width() as usize, image.height() as usize],
                             image.as_raw(),
                         );
                         let accent = style::dominant(&image);
-                        (image, accent)
+                        (image, accent, glow)
                     });
                 if tx.send((path, image)).is_err() {
                     break;
@@ -47,6 +54,7 @@ impl Artwork {
             pending: HashSet::new(),
             textures: HashMap::new(),
             accents: HashMap::new(),
+            glows: HashMap::new(),
             order: VecDeque::new(),
         }
     }
@@ -54,14 +62,20 @@ impl Artwork {
     pub fn invalidate(&mut self) {
         self.textures.clear();
         self.accents.clear();
+        self.glows.clear();
         self.order.clear();
     }
 
     pub fn drain(&mut self, ctx: &egui::Context) {
         while let Ok((path, image)) = self.results.try_recv() {
             self.pending.remove(&path);
-            let texture = image.map(|(image, accent)| {
+            let texture = image.map(|(image, accent, glow)| {
                 self.accents.insert(path.clone(), accent);
+                let name = format!("glow:{}", path.display());
+                self.glows.insert(
+                    path.clone(),
+                    ctx.load_texture(name, glow, egui::TextureOptions::LINEAR),
+                );
                 ctx.load_texture(path.to_string_lossy(), image, egui::TextureOptions::LINEAR)
             });
             self.textures.insert(path.clone(), texture);
@@ -69,6 +83,7 @@ impl Artwork {
             while self.order.len() > 48 {
                 if let Some(old) = self.order.pop_front() {
                     self.textures.remove(&old);
+                    self.glows.remove(&old);
                 }
             }
         }
@@ -83,6 +98,11 @@ impl Artwork {
             self.pending.insert(path.to_path_buf());
         }
         None
+    }
+
+    /// The blurred backdrop for a cover that has already been loaded.
+    pub fn glow(&self, path: &Path) -> Option<TextureId> {
+        self.glows.get(path).map(TextureHandle::id)
     }
 
     pub fn accent(&self, path: &Path) -> Option<Color32> {
