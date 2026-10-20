@@ -29,11 +29,15 @@ impl Artwork {
                     .and_then(|reader| reader.decode().ok())
                     .map(|image| {
                         let image = image.thumbnail(256, 256);
-                        // a tiny copy; stretched out with linear filtering it becomes a soft glow
+                        // The bar is about ten times wider than tall, so a horizontal strip
+                        // from the lower middle of the cover fits it without stretching, and
+                        // shrunk to a few pixels it becomes a soft glow under linear filtering.
+                        let (w, h) = (image.width(), image.height());
                         let glow = image
-                            .resize_exact(16, 16, image::imageops::FilterType::Triangle)
+                            .crop_imm(0, h * 6 / 10, w, (h / 10).max(1))
+                            .resize_exact(48, 5, image::imageops::FilterType::Triangle)
                             .to_rgba8();
-                        let glow = ColorImage::from_rgba_unmultiplied([16, 16], glow.as_raw());
+                        let glow = ColorImage::from_rgba_unmultiplied([48, 5], glow.as_raw());
                         let image = image.to_rgba8();
                         let image = ColorImage::from_rgba_unmultiplied(
                             [image.width() as usize, image.height() as usize],
