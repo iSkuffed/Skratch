@@ -207,7 +207,6 @@ pub enum Icon {
     Next,
     Play,
     Pause,
-    Stop,
 }
 
 pub fn icon_button(
@@ -260,7 +259,6 @@ pub fn icon_button(
             p.add(bar(-u * 0.5, u * 0.55));
             p.add(bar(u * 0.5, u * 0.55))
         }
-        Icon::Stop => p.add(bar(0.0, u * 1.7)),
         Icon::Prev => {
             p.add(bar(-u * 0.9, u * 0.4));
             p.add(tri(-u * 0.7, u * 0.9))
@@ -273,13 +271,77 @@ pub fn icon_button(
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
-/// A seek bar drawn as record grooves. Bar heights are a stable pattern per `seed`, not real audio.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Toggle {
+    Shuffle,
+    Repeat,
+    /// Repeat with a "1" in the loop.
+    RepeatOne,
+}
+
+/// A small outline icon that lights up in `active` colour when switched on.
+pub fn toggle_button(ui: &mut Ui, toggle: Toggle, size: f32, active: Option<Color32>) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    let p = ui.painter();
+    let (c, u) = (rect.center(), size * 0.24);
+    if response.hovered() {
+        p.circle_filled(c, size / 2.0, RAISED);
+    }
+    let fg = active.unwrap_or(CREAM_DIM);
+    let stroke = Stroke::new(1.8_f32, fg);
+    let at = |x: f32, y: f32| Pos2::new(c.x + x * u, c.y + y * u);
+    let line = |points: &[(f32, f32)]| {
+        p.add(Shape::line(
+            points.iter().map(|&(x, y)| at(x, y)).collect(),
+            stroke,
+        ));
+    };
+    // arrowhead whose tip is at (x, y), pointing right (dir = 1) or left (dir = -1)
+    let head = |x: f32, y: f32, dir: f32| {
+        p.add(Shape::convex_polygon(
+            vec![
+                at(x, y),
+                at(x - dir * 0.9, y - 0.6),
+                at(x - dir * 0.9, y + 0.6),
+            ],
+            fg,
+            Stroke::NONE,
+        ));
+    };
+    match toggle {
+        Toggle::Shuffle => {
+            line(&[(-1.5, -0.9), (-0.5, -0.9), (0.5, 0.9), (1.0, 0.9)]);
+            line(&[(-1.5, 0.9), (-0.5, 0.9), (0.5, -0.9), (1.0, -0.9)]);
+            head(1.7, -0.9, 1.0);
+            head(1.7, 0.9, 1.0);
+        }
+        Toggle::Repeat | Toggle::RepeatOne => {
+            line(&[(-1.4, 0.0), (-1.4, -0.9), (0.6, -0.9)]);
+            line(&[(1.4, 0.0), (1.4, 0.9), (-0.6, 0.9)]);
+            head(1.6, -0.9, 1.0);
+            head(-1.6, 0.9, -1.0);
+            if toggle == Toggle::RepeatOne {
+                p.text(
+                    c,
+                    Align2::CENTER_CENTER,
+                    "1",
+                    FontId::proportional(size * 0.34),
+                    fg,
+                );
+            }
+        }
+    }
+    response.on_hover_cursor(CursorIcon::PointingHand)
+}
+
+/// A seek bar drawn as record grooves. Bar heights are the track's loudness (`peaks`, evenly
+/// spaced over the whole track); until it is known the bars sit flat.
 /// Returns the new position while the user clicks or drags.
 pub fn groove_seek(
     ui: &mut Ui,
     position: f64,
     duration: f64,
-    seed: u64,
+    peaks: &[f32],
     accent: Color32,
 ) -> Option<f64> {
     let (rect, response) = ui.allocate_exact_size(
@@ -287,16 +349,18 @@ pub fn groove_seek(
         Sense::click_and_drag(),
     );
     let fraction = (position / duration.max(1.0)).clamp(0.0, 1.0) as f32;
-    let (a, b) = ((seed % 97) as f32, (seed / 97 % 89) as f32);
     let n = (rect.width() / 4.0) as usize;
     let p = ui.painter();
     for k in 0..n {
         let x = rect.left() + (k as f32 + 0.5) * rect.width() / n as f32;
-        let t = k as f32;
-        let wave = 0.5
-            + 0.28 * (t * 0.31 + a).sin()
-            + 0.16 * (t * 0.83 + b).sin()
-            + 0.06 * (t * 2.1 + a * b).sin();
+        let (from, to) = (
+            k * peaks.len() / n,
+            ((k + 1) * peaks.len() / n).max(k * peaks.len() / n + 1),
+        );
+        let wave = peaks[from.min(peaks.len())..to.min(peaks.len())]
+            .iter()
+            .copied()
+            .fold(0.0, f32::max);
         let half = (rect.height() * 0.5 * wave).max(2.0);
         let color = if (k as f32 + 0.5) / (n as f32) <= fraction {
             accent

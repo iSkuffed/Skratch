@@ -784,7 +784,10 @@ impl Skratch {
                     View::Downloads,
                 ] {
                     if ui
-                        .selectable_label(self.view == view, RichText::new(format!("{}  {}", view.icon(), view.title())).size(16.0))
+                        .selectable_label(
+                            self.view == view,
+                            RichText::new(format!("{}  {}", view.icon(), view.title())).size(16.0),
+                        )
                         .clicked()
                     {
                         self.view = view;
@@ -942,6 +945,9 @@ impl Skratch {
 
     fn player_bar(&mut self, ui: &mut egui::Ui, radius: u8) {
         let track = self.current().cloned();
+        if let Some(track) = &track {
+            self.reactive.track(ui.ctx(), &track.path);
+        }
         let accent = self.accent;
         let art = track
             .as_ref()
@@ -1059,22 +1065,6 @@ impl Skratch {
                                     if slider.changed() || wheel != 0.0 {
                                         self.action = Some(Action::Volume(volume));
                                     }
-                                    let label = match self.state.queue.repeat {
-                                        Repeat::Off => "Repeat: off",
-                                        Repeat::All => "Repeat: all",
-                                        Repeat::One => "Repeat: one",
-                                    };
-                                    if ui.button(label).clicked() {
-                                        self.state.queue.repeat = match self.state.queue.repeat {
-                                            Repeat::Off => Repeat::All,
-                                            Repeat::All => Repeat::One,
-                                            Repeat::One => Repeat::Off,
-                                        };
-                                    }
-                                    let mut shuffle = self.state.queue.shuffle;
-                                    if ui.toggle_value(&mut shuffle, "Shuffle").clicked() {
-                                        self.state.queue.set_shuffle(shuffle);
-                                    }
                                 },
                             );
                         });
@@ -1085,6 +1075,22 @@ impl Skratch {
                             layout,
                             |ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
+                                let shuffle = self.state.queue.shuffle;
+                                if style::toggle_button(
+                                    ui,
+                                    style::Toggle::Shuffle,
+                                    30.0,
+                                    shuffle.then_some(accent),
+                                )
+                                .on_hover_text(if shuffle {
+                                    "Shuffle: on"
+                                } else {
+                                    "Shuffle: off"
+                                })
+                                .clicked()
+                                {
+                                    self.state.queue.set_shuffle(!shuffle);
+                                }
                                 if style::icon_button(ui, Icon::Prev, 34.0, None, true).clicked() {
                                     self.action = Some(Action::Previous);
                                 }
@@ -1101,21 +1107,38 @@ impl Skratch {
                                 if style::icon_button(ui, Icon::Next, 34.0, None, true).clicked() {
                                     self.action = Some(Action::Next);
                                 }
-                                if style::icon_button(ui, Icon::Stop, 34.0, None, true).clicked() {
-                                    self.action = Some(Action::Stop);
+                                let repeat = self.state.queue.repeat;
+                                let (toggle, hint) = match repeat {
+                                    Repeat::Off => (style::Toggle::Repeat, "Repeat: off"),
+                                    Repeat::All => (style::Toggle::Repeat, "Repeat: all"),
+                                    Repeat::One => (style::Toggle::RepeatOne, "Repeat: one"),
+                                };
+                                if style::toggle_button(
+                                    ui,
+                                    toggle,
+                                    30.0,
+                                    (repeat != Repeat::Off).then_some(accent),
+                                )
+                                .on_hover_text(hint)
+                                .clicked()
+                                {
+                                    self.state.queue.repeat = match repeat {
+                                        Repeat::Off => Repeat::All,
+                                        Repeat::All => Repeat::One,
+                                        Repeat::One => Repeat::Off,
+                                    };
                                 }
                                 ui.add_space(10.0);
                                 ui.label(time(self.state.position));
                                 ui.add_space(4.0);
                                 // reserve room for the duration label after the grooves
                                 let width = (ui.available_width() - 56.0).max(60.0);
-                                let seed = track.as_ref().map_or(0, |t| t.id as u64);
                                 ui.allocate_ui(egui::vec2(width, 30.0), |ui| {
                                     if let Some(position) = style::groove_seek(
                                         ui,
                                         self.state.position,
                                         self.duration,
-                                        seed,
+                                        self.reactive.peaks(),
                                         accent,
                                     ) {
                                         self.action = Some(Action::Seek(position));

@@ -1,5 +1,5 @@
-//! Loudness of a track's low end over time, for the halo on the Now playing page.
-//! Decoding the whole file up front (a second or two) keeps this independent of mpv.
+//! Loudness of a track over time: the low end for the halo on the Now playing page, and the
+//! overall level for the waveform in the player bar. Decoding the whole file up front (a second or two) keeps this independent of mpv.
 use eframe::egui;
 use std::{
     f32::consts::TAU,
@@ -21,8 +21,23 @@ pub const RATE: f32 = 30.0;
 /// Cut-off of the low-pass filter that isolates kick and bass.
 const BASS_HZ: f32 = 150.0;
 
-/// The bass level (0 to 1) every `1 / RATE` seconds, or `None` if the file can't be decoded.
-pub fn bass(path: &Path) -> Option<Vec<f32>> {
+/// What one decoding pass learns about a track, one value (0 to 1) every `1 / RATE` seconds.
+pub struct Analysis {
+    pub bass: Vec<f32>,
+    /// Overall loudness, for the waveform.
+    pub peaks: Vec<f32>,
+}
+
+/// Scales so the loud parts reach 1 whatever the mastering level.
+fn normalise(values: &[f32]) -> Vec<f32> {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    let top = sorted[sorted.len() * 95 / 100].max(1e-4);
+    values.iter().map(|v| (v / top).min(1.0)).collect()
+}
+
+/// Decodes the whole file, or `None` if it can't be decoded.
+pub fn analyse(path: &Path) -> Option<Analysis> {
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
@@ -47,8 +62,8 @@ pub fn bass(path: &Path) -> Option<Vec<f32>> {
         .ok()?;
 
     let mut samples = Vec::new();
-    let mut energy = Vec::new();
-    let (mut low, mut sum, mut count) = (0.0f32, 0.0f32, 0usize);
+    let (mut energy, mut loudness) = (Vec::new(), Vec::new());
+    let (mut low, mut sum, mut full, mut count) = (0.0f32, 0.0f32, 0.0f32, 0usize);
     while let Ok(Some(packet)) = format.next_packet() {
         if packet.track_id != track_id {
             continue;
@@ -69,34 +84,32 @@ pub fn bass(path: &Path) -> Option<Vec<f32>> {
             let mono = frame.iter().sum::<f32>() / channels as f32;
             low += alpha * (mono - low);
             sum += low * low;
+            full += mono * mono;
             count += 1;
             if count >= window {
                 energy.push((sum / count as f32).sqrt());
-                (sum, count) = (0.0, 0);
+                loudness.push((full / count as f32).sqrt());
+                (sum, count, full) = (0.0, 0, 0.0);
             }
         }
     }
     if energy.is_empty() {
         return None;
     }
-    // scale so the loud parts reach 1 whatever the mastering level, then square for punch
-    let mut sorted = energy.clone();
-    sorted.sort_by(f32::total_cmp);
-    let top = sorted[sorted.len() * 95 / 100].max(1e-4);
-    Some(
-        energy
-            .into_iter()
-            .map(|e| (e / top).min(1.0).powi(2))
-            .collect(),
-    )
+    // square the bass for punch; the waveform gets a square root so quiet passages still show
+    Some(Analysis {
+        bass: normalise(&energy).into_iter().map(|e| e * e).collect(),
+        peaks: normalise(&loudness).into_iter().map(f32::sqrt).collect(),
+    })
 }
 
 /// Follows the bass of whatever is playing, smoothed so a beat snaps up and then falls away.
 pub struct Reactive {
-    tx: Sender<(PathBuf, Vec<f32>)>,
-    rx: Receiver<(PathBuf, Vec<f32>)>,
+    tx: Sender<(PathBuf, Analysis)>,
+    rx: Receiver<(PathBuf, Analysis)>,
     track: Option<PathBuf>,
     levels: Vec<f32>,
+    peaks: Vec<f32>,
     /// The last position mpv reported and when it arrived, so time can run between reports.
     anchor: (f64, Instant),
     pulse: f32,
@@ -110,6 +123,7 @@ impl Default for Reactive {
             rx,
             track: None,
             levels: Vec::new(),
+            peaks: Vec::new(),
             anchor: (0.0, Instant::now()),
             pulse: 0.0,
         }
@@ -117,25 +131,38 @@ impl Default for Reactive {
 }
 
 impl Reactive {
-    /// The smoothed bass level (0 to 1) for this frame. Starts analysing a new track on demand;
-    /// until that finishes, or for formats the decoder lacks, the level stays at zero.
-    pub fn level(&mut self, ctx: &egui::Context, path: &Path, position: f64, playing: bool) -> f32 {
+    /// Starts analysing `path` if it is not the current track, and collects a finished analysis.
+    pub fn track(&mut self, ctx: &egui::Context, path: &Path) {
         if self.track.as_deref() != Some(path) {
             self.track = Some(path.to_path_buf());
             self.levels.clear();
+            self.peaks.clear();
             let (path, tx, ctx) = (path.to_path_buf(), self.tx.clone(), ctx.clone());
             std::thread::spawn(move || {
-                if let Some(levels) = bass(&path) {
-                    let _ = tx.send((path, levels));
+                if let Some(analysis) = analyse(&path) {
+                    let _ = tx.send((path, analysis));
                     ctx.request_repaint();
                 }
             });
         }
-        while let Ok((done, levels)) = self.rx.try_recv() {
+        while let Ok((done, analysis)) = self.rx.try_recv() {
             if self.track.as_deref() == Some(done.as_path()) {
-                self.levels = levels;
+                self.levels = analysis.bass;
+                self.peaks = analysis.peaks;
             }
         }
+    }
+
+    /// The whole track's loudness for the waveform; empty until the analysis finishes, or for
+    /// formats the decoder lacks.
+    pub fn peaks(&self) -> &[f32] {
+        &self.peaks
+    }
+
+    /// The smoothed bass level (0 to 1) for this frame. Until the analysis finishes, or for
+    /// formats the decoder lacks, the level stays at zero.
+    pub fn level(&mut self, ctx: &egui::Context, path: &Path, position: f64, playing: bool) -> f32 {
+        self.track(ctx, path);
         if position != self.anchor.0 {
             self.anchor = (position, Instant::now());
         }
@@ -186,9 +213,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tone.wav");
         std::fs::write(&path, wav()).unwrap();
-        let levels = bass(&path).expect("decodes");
+        let analysis = analyse(&path).expect("decodes");
+        let (levels, peaks) = (analysis.bass, analysis.peaks);
         assert!((55..=65).contains(&levels.len()), "{}", levels.len());
         assert!(levels[10] > 0.8, "loud half: {}", levels[10]);
         assert!(levels[50] < 0.05, "silent half: {}", levels[50]);
+        assert!(
+            peaks[10] > 0.8 && peaks[50] < 0.05,
+            "{} {}",
+            peaks[10],
+            peaks[50]
+        );
     }
 }

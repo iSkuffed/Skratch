@@ -35,7 +35,12 @@ impl Artwork {
                     .ok()
                     .and_then(|reader| reader.decode().ok())
                     .map(|image| {
-                        let image = image.thumbnail(256, 256);
+                        // Covers are shown in squares; a 16:9 YouTube thumbnail would be squashed.
+                        let (w, h) = (image.width(), image.height());
+                        let side = w.min(h);
+                        let image = image
+                            .crop_imm((w - side) / 2, (h - side) / 2, side, side)
+                            .thumbnail(256, 256);
                         // The bar is about ten times wider than tall, so a horizontal strip
                         // from the lower middle of the cover fits it without stretching, and
                         // shrunk to a few pixels it becomes a soft glow under linear filtering.
