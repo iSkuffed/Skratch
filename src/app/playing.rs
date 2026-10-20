@@ -24,6 +24,34 @@ impl Skratch {
             let scale = r / 52.0;
             let centre = pos2(area.left() + r * 1.2 + 30.0, area.center().y);
 
+            // the cover as a poster on the right, fading out towards the record
+            if let Some(art) = art {
+                let side = area.height() * 1.1;
+                let poster = egui::Rect::from_min_size(
+                    pos2(area.right() - side * 0.9, area.top() - side * 0.05),
+                    vec2(side, side),
+                );
+                let mut mesh = egui::Mesh::with_texture(art);
+                // three columns: transparent on the left, full tint from 60% across
+                for (u, alpha) in [(0.0, 0), (0.6, 32), (1.0, 32)] {
+                    let x = egui::lerp(poster.x_range(), u);
+                    for v in [0.0, 1.0] {
+                        mesh.vertices.push(egui::epaint::Vertex {
+                            pos: pos2(x, egui::lerp(poster.y_range(), v)),
+                            uv: pos2(u, v),
+                            color: egui::Color32::from_white_alpha(alpha),
+                        });
+                    }
+                }
+                for i in [0, 2] {
+                    mesh.add_triangle(i, i + 1, i + 2);
+                    mesh.add_triangle(i + 1, i + 2, i + 3);
+                }
+                ui.painter()
+                    .with_clip_rect(area)
+                    .add(egui::Shape::mesh(mesh));
+            }
+
             // a faint halo in the track's colour
             for (grow, alpha) in [(1.4, 0.04), (1.25, 0.05), (1.1, 0.07)] {
                 ui.painter()

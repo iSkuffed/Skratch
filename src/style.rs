@@ -349,7 +349,7 @@ pub fn title_bar(ui: &mut Ui, logo: &egui::TextureHandle, accent: Color32, now: 
         .with_min_y(rect.top() + 6.0);
     let drag = ui.interact(drag_area, ui.id().with("drag"), Sense::click_and_drag());
     if drag.drag_started_by(PointerButton::Primary) {
-        ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+        hand_to_compositor(&ctx, ViewportCommand::StartDrag);
     }
     if drag.double_clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
@@ -431,6 +431,28 @@ pub fn title_bar(ui: &mut Ui, logo: &egui::TextureHandle, accent: Color32, now: 
     }
 }
 
+const RELEASE: &str = "release_after_compositor_grab";
+
+/// Starts a window-manager drag or resize. The compositor then owns the pointer and swallows
+/// the button release, which would leave egui believing the button is still held.
+fn hand_to_compositor(ctx: &Context, command: ViewportCommand) {
+    ctx.send_viewport_cmd(command);
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(RELEASE), true));
+    ctx.request_repaint();
+}
+
+/// Call from `App::raw_input_hook`: delivers the release the compositor ate.
+pub fn release_after_grab(ctx: &Context, raw: &mut egui::RawInput) {
+    if ctx.data_mut(|d| d.remove_temp::<bool>(egui::Id::new(RELEASE))) == Some(true) {
+        raw.events.push(egui::Event::PointerButton {
+            pos: ctx.input(|i| i.pointer.latest_pos()).unwrap_or(Pos2::ZERO),
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Default::default(),
+        });
+    }
+}
+
 /// Without a native frame the window needs its own invisible resize borders.
 pub fn resize_edges(ctx: &Context) {
     const M: f32 = 6.0;
@@ -453,6 +475,6 @@ pub fn resize_edges(ctx: &Context) {
     };
     ctx.set_cursor_icon(cursor);
     if ctx.input(|i| i.pointer.primary_pressed()) {
-        ctx.send_viewport_cmd(ViewportCommand::BeginResize(direction));
+        hand_to_compositor(ctx, ViewportCommand::BeginResize(direction));
     }
 }

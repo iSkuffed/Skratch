@@ -1914,6 +1914,10 @@ impl Skratch {
 }
 
 impl eframe::App for Skratch {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        style::release_after_grab(ctx, raw_input);
+    }
+
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.poll(ctx);
         self.poll_setup();
