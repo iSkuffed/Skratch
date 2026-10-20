@@ -188,13 +188,17 @@ pub fn record(p: &Painter, c: Pos2, r: f32, art: Option<TextureId>, label: Color
 }
 
 /// Tonearm resting off the record at `lowered == 0.0` and sitting in the grooves at `1.0`.
-pub fn tonearm(p: &Painter, pivot: Pos2, lowered: f32, accent: Color32) {
+/// `scale` is 1.0 for the player bar's 52 px record.
+pub fn tonearm(p: &Painter, pivot: Pos2, lowered: f32, accent: Color32, scale: f32) {
     let angle = (95.0 + 30.0 * lowered).to_radians();
-    let head = pivot + 100.0 * Vec2::angled(angle);
-    p.line_segment([pivot, head], stroke(3.0, Color32::from_rgb(120, 109, 98)));
-    p.circle_filled(pivot, 8.0, RAISED);
-    p.circle_stroke(pivot, 8.0, stroke(1.0, EDGE));
-    p.circle_filled(head, 4.5, accent);
+    let head = pivot + 100.0 * scale * Vec2::angled(angle);
+    p.line_segment(
+        [pivot, head],
+        stroke(3.0 * scale, Color32::from_rgb(120, 109, 98)),
+    );
+    p.circle_filled(pivot, 8.0 * scale, RAISED);
+    p.circle_stroke(pivot, 8.0 * scale, stroke(1.0, EDGE));
+    p.circle_filled(head, 4.5 * scale, accent);
 }
 
 #[derive(Clone, Copy, PartialEq)]

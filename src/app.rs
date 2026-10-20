@@ -22,6 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod playing;
 mod setup;
 
 const SEARCH_ID: &str = "library-search";
@@ -32,6 +33,7 @@ enum View {
     Artists,
     Tracks,
     Queue,
+    Playing,
     Downloads,
 }
 impl View {
@@ -41,6 +43,7 @@ impl View {
             Self::Artists => "Artists",
             Self::Tracks => "All tracks",
             Self::Queue => "Play queue",
+            Self::Playing => "Now playing",
             Self::Downloads => "Downloads",
         }
     }
@@ -756,6 +759,7 @@ impl Skratch {
                     View::Artists,
                     View::Tracks,
                     View::Queue,
+                    View::Playing,
                     View::Downloads,
                 ] {
                     if ui
@@ -955,8 +959,18 @@ impl Skratch {
                     None => {}
                 }
                 ui.horizontal(|ui| {
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(160.0, 112.0), egui::Sense::hover());
+                    let (rect, response) =
+                        ui.allocate_exact_size(egui::vec2(160.0, 112.0), egui::Sense::click());
+                    if response
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("Open Now playing")
+                        .clicked()
+                    {
+                        self.view = View::Playing;
+                        self.selected_group = None;
+                        self.selected.clear();
+                        self.rebuild();
+                    }
                     let center = egui::pos2(rect.left() + 56.0, rect.center().y);
                     style::record(ui.painter(), center, 52.0, art, label, self.spin);
                     style::tonearm(
@@ -964,6 +978,7 @@ impl Skratch {
                         egui::pos2(rect.left() + 148.0, rect.top() + 2.0),
                         self.arm,
                         accent,
+                        1.0,
                     );
                     ui.add_space(6.0);
                     ui.vertical(|ui| {
@@ -1381,6 +1396,10 @@ impl Skratch {
     }
 
     fn library_ui(&mut self, ui: &mut egui::Ui) {
+        if self.view == View::Playing {
+            self.playing_ui(ui);
+            return;
+        }
         if self.view == View::Downloads {
             egui::CentralPanel::default().show_inside(ui, |ui| self.download_ui(ui));
             return;
@@ -1899,7 +1918,7 @@ impl eframe::App for Skratch {
         self.poll(ctx);
         self.poll_setup();
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
-            if self.view == View::Downloads {
+            if matches!(self.view, View::Downloads | View::Playing) {
                 self.view = View::Albums;
                 self.selected_group = None;
                 self.rebuild();
@@ -1908,6 +1927,15 @@ impl eframe::App for Skratch {
         }
         if !ctx.wants_keyboard_input() && ctx.input(|input| input.key_pressed(egui::Key::Space)) {
             self.perform(Action::Pause);
+        }
+        // arrow keys scrub, unless a text box is using them
+        if !ctx.wants_keyboard_input() && self.state.queue.current_id().is_some() {
+            for (key, seconds) in [(egui::Key::ArrowLeft, -5.0), (egui::Key::ArrowRight, 5.0)] {
+                // one call takes one key event, and a held key can bring several per frame
+                while ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
+                    self.perform(Action::Seek(self.state.position + seconds));
+                }
+            }
         }
         self.animate(ctx);
         let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
