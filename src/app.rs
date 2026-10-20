@@ -6,6 +6,7 @@ use crate::{
 };
 use eframe::egui::{self, Color32, CornerRadius, Frame, Margin, RichText};
 use skratch::{
+    analysis::Reactive,
     download::{DownloadEvent, DownloadFormat, DownloadRequest, Downloader},
     media::{DesktopControls, MediaCommand},
     model::{MetadataEdit, Track},
@@ -194,6 +195,7 @@ pub struct Skratch {
     spin: f32,
     spin_speed: f32,
     arm: f32,
+    reactive: Reactive,
 }
 
 impl Skratch {
@@ -287,6 +289,7 @@ impl Skratch {
             spin: 0.0,
             spin_speed: 0.0,
             arm: 0.0,
+            reactive: Reactive::default(),
         };
         app.refresh_tools();
         app

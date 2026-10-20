@@ -52,10 +52,16 @@ impl Skratch {
                     .add(egui::Shape::mesh(mesh));
             }
 
-            // a faint halo in the track's colour
-            for (grow, alpha) in [(1.4, 0.04), (1.25, 0.05), (1.1, 0.07)] {
-                ui.painter()
-                    .circle_filled(centre, r * grow, self.accent.gamma_multiply(alpha));
+            // a faint halo in the track's colour that swells with the bass
+            let beat =
+                self.reactive
+                    .level(ui.ctx(), &track.path, self.state.position, self.playing);
+            for (grow, alpha, reach) in [(1.4, 0.04, 0.22), (1.25, 0.05, 0.13), (1.1, 0.07, 0.06)] {
+                ui.painter().circle_filled(
+                    centre,
+                    r * (grow + reach * beat),
+                    self.accent.gamma_multiply(alpha + 0.04 * beat),
+                );
             }
             let hit = egui::Rect::from_center_size(centre, vec2(2.0 * r, 2.0 * r));
             let response = ui

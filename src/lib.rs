@@ -1,3 +1,4 @@
+pub mod analysis;
 pub mod download;
 pub mod library;
 pub mod media;
