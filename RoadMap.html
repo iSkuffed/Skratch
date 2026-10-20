@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Skratch / Roadmap</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #111211;
+      --panel: #191a18;
+      --panel-raised: #20211f;
+      --line: #30312e;
+      --text: #eeeee9;
+      --muted: #aaa9a1;
+      --quiet: #77786f;
+      --accent: #e58a45;
+      --accent-soft: #37281d;
+      --green: #a9c29d;
+      --blue: #a9bdd1;
+      --radius: 14px;
+    }
+
+    * { box-sizing: border-box; }
+    html { background: var(--page); }
+    body {
+      margin: 0;
+      background: var(--page);
+      color: var(--text);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 15px;
+      line-height: 1.6;
+    }
+
+    a { color: #e7ad7e; text-underline-offset: 3px; }
+    a:hover { color: #ffd0a7; }
+    a:focus-visible, button:focus-visible, input:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 3px;
+    }
+
+    .shell { width: min(100% - 40px, 960px); margin: 0 auto; }
+    .topline { border-bottom: 1px solid var(--line); }
+    .topline-inner {
+      min-height: 64px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 20px;
+    }
+    .brand { color: var(--text); font-size: 14px; font-weight: 650; letter-spacing: .02em; }
+    .brand span { color: var(--quiet); padding: 0 7px; font-weight: 400; }
+    .nav-links { display: flex; gap: 20px; font-size: 13px; }
+    .nav-links a { color: var(--muted); }
+
+    main { padding: 64px 0 76px; }
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    h1 { margin: 0; font-size: clamp(34px, 6vw, 52px); line-height: 1.08; letter-spacing: -.045em; }
+    .lede { max-width: 650px; margin: 18px 0 0; color: var(--muted); font-size: 16px; }
+    .updated { margin: 14px 0 0; color: var(--quiet); font-size: 13px; }
+
+    .toolbar {
+      margin: 36px 0 26px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 14px;
+    }
+    .filters { display: flex; flex-wrap: wrap; gap: 7px; }
+    .filter {
+      appearance: none;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 7px 12px;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .filter:hover { border-color: #565750; color: var(--text); }
+    .filter[aria-pressed="true"] { border-color: #89572f; background: var(--accent-soft); color: #ffd0a7; }
+    .search-wrap { display: flex; align-items: center; gap: 9px; color: var(--quiet); font-size: 12px; }
+    .search {
+      width: min(240px, 56vw);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      background: var(--panel);
+      color: var(--text);
+      font: inherit;
+      font-size: 13px;
+    }
+
+    .section { margin-top: 30px; }
+    .section-heading {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 12px;
+    }
+    h2 { margin: 0; font-size: 18px; letter-spacing: -.015em; }
+    .section-note { margin: 0; color: var(--quiet); font-size: 12px; }
+    .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .card {
+      min-width: 0;
+      padding: 18px 19px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+    }
+    .card.wide { grid-column: 1 / -1; }
+    .card-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    h3 { margin: 0; font-size: 15px; line-height: 1.4; font-weight: 650; }
+    .badge {
+      flex: 0 0 auto;
+      border-radius: 999px;
+      padding: 3px 8px;
+      color: var(--muted);
+      background: var(--panel-raised);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .07em;
+      text-transform: uppercase;
+    }
+    [data-status="current"] .badge { color: #ffd0a7; background: var(--accent-soft); }
+    [data-status="working"] .badge { color: var(--green); background: #20271e; }
+    [data-status="next"] .badge { color: var(--blue); background: #20252b; }
+    .card p { margin: 9px 0 0; color: var(--muted); font-size: 13px; }
+    .empty { display: none; margin: 20px 0; color: var(--muted); text-align: center; }
+
+    footer { border-top: 1px solid var(--line); padding: 20px 0 28px; color: var(--quiet); font-size: 12px; }
+    footer p { margin: 0; }
+    footer a { color: var(--muted); }
+
+    @media (max-width: 650px) {
+      .shell { width: min(100% - 28px, 960px); }
+      main { padding-top: 44px; }
+      .cards { grid-template-columns: 1fr; }
+      .card.wide { grid-column: auto; }
+      .toolbar { align-items: flex-start; }
+      .search-wrap { width: 100%; justify-content: space-between; }
+      .search { flex: 1; }
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      .card { transition: border-color 140ms ease; }
+      .card:hover { border-color: #4a4b46; }
+    }
+  </style>
+</head>
+<body>
+  <div class="topline">
+    <div class="shell topline-inner">
+      <div class="brand">Skratch <span>/</span> Roadmap</div>
+      <nav class="nav-links" aria-label="Project documents">
+        <a href="README.md">README</a>
+        <a href="docs/VALIDATION.md">Validation</a>
+      </nav>
+    </div>
+  </div>
+
+  <main class="shell">
+    <header>
+      <p class="eyebrow">Project status</p>
+      <h1>Roadmap</h1>
+      <p class="lede">Working features and ideas for later.</p>
+      <p class="updated">Last updated <time datetime="2026-10-19">October 19, 2026</time></p>
+    </header>
+
+    <div class="toolbar">
+      <div class="filters" role="group" aria-label="Filter roadmap by status">
+        <button class="filter" type="button" data-filter="all" aria-pressed="true">All</button>
+        <button class="filter" type="button" data-filter="working" aria-pressed="false">Working</button>
+        <button class="filter" type="button" data-filter="next" aria-pressed="false">Next</button>
+        <button class="filter" type="button" data-filter="later" aria-pressed="false">Later</button>
+      </div>
+      <label class="search-wrap" for="roadmap-search">
+        <span>Find an item</span>
+        <input class="search" id="roadmap-search" type="search" placeholder="Search roadmap" autocomplete="off">
+      </label>
+    </div>
+
+    <section class="section" aria-labelledby="working-heading">
+      <div class="section-heading">
+        <h2 id="working-heading">Working</h2>
+        <p class="section-note">Implemented and covered by initial validation</p>
+      </div>
+      <div class="cards">
+        <article class="card" data-status="working">
+          <div class="card-top"><h3>Native local playback</h3><span class="badge">Working</span></div>
+          <p>Rust desktop app with a headless mpv player. MP4 files play audio without video rendering.</p>
+        </article>
+        <article class="card" data-status="working">
+          <div class="card-top"><h3>Watched folders and library</h3><span class="badge">Working</span></div>
+          <p>Folders persist across restarts and changes are watched. Browse albums, artists, or tracks; search and sort the library.</p>
+        </article>
+        <article class="card" data-status="working">
+          <div class="card-top"><h3>Artwork and tag editing</h3><span class="badge">Working</span></div>
+          <p>Reads embedded or folder artwork. Edit supported tags and rename files in place; existing destination files are not overwritten.</p>
+        </article>
+        <article class="card" data-status="working">
+          <div class="card-top"><h3>Playback controls and restore</h3><span class="badge">Working</span></div>
+          <p>Shuffle, repeat, queue and position restore, plus desktop media controls through MPRIS.</p>
+        </article>
+        <article class="card wide" data-status="working">
+          <div class="card-top"><h3>Initial validation and resource sample</h3><span class="badge">Working</span></div>
+          <p>26 tests passed. The original player-only run with seven generated tracks used 53 MiB app PSS idle and about 111 MiB app-plus-mpv PSS during playback. Large-library use has not been measured.</p>
+        </article>
+        <article class="card wide" data-status="working">
+          <div class="card-top"><h3>yt-dlp download panel</h3><span class="badge">Working</span></div>
+          <p>One URL downloads one item as original audio or MP3 to a chosen source destination. Metadata and thumbnails are kept where available. The panel reports progress and supports cancellation; partial downloads stay staged until completion.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="next-heading">
+      <div class="section-heading">
+        <h2 id="next-heading">Next</h2>
+        <p class="section-note">Ideas to review</p>
+      </div>
+      <div class="cards">
+        <article class="card" data-status="next">
+          <div class="card-top"><h3>Large-library profiling</h3><span class="badge">Candidate</span></div>
+          <p>Measure indexing, browsing, memory, and responsiveness on a large collection, including playback while the downloader is active.</p>
+        </article>
+        <article class="card" data-status="next">
+          <div class="card-top"><h3>Named saved playlists</h3><span class="badge">Candidate</span></div>
+          <p>Save and reopen playlists by name.</p>
+        </article>
+        <article class="card" data-status="next">
+          <div class="card-top"><h3>Gapless playback validation</h3><span class="badge">Candidate</span></div>
+          <p>Check track transitions across supported formats and identify where gapless playback can be guaranteed.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="later-heading">
+      <div class="section-heading">
+        <h2 id="later-heading">Later</h2>
+        <p class="section-note">Deferred areas</p>
+      </div>
+      <div class="cards">
+        <article class="card" data-status="later">
+          <div class="card-top"><h3>Alternate layouts and skinning</h3><span class="badge">Later</span></div>
+          <p>Explore alternate front-end layouts, including AIMP-inspired arrangements, and a skinning system.</p>
+        </article>
+        <article class="card" data-status="later">
+          <div class="card-top"><h3>Full video display</h3><span class="badge">Later</span></div>
+          <p>Render video for media files that currently provide audio playback only.</p>
+        </article>
+        <article class="card" data-status="later">
+          <div class="card-top"><h3>Visualizers</h3><span class="badge">Later</span></div>
+          <p>Add optional visual playback displays.</p>
+        </article>
+      </div>
+    </section>
+    <p class="empty" id="empty-state" role="status">No matching roadmap items.</p>
+  </main>
+
+  <footer>
+    <div class="shell">
+      <p>Project details and validation evidence: <a href="README.md">README.md</a> · <a href="docs/VALIDATION.md">docs/VALIDATION.md</a></p>
+    </div>
+  </footer>
+
+  <script>
+    (() => {
+      const cards = [...document.querySelectorAll(".card[data-status]")];
+      const filters = [...document.querySelectorAll(".filter[data-filter]")];
+      const search = document.querySelector("#roadmap-search");
+      const empty = document.querySelector("#empty-state");
+      let activeFilter = "all";
+
+      function update() {
+        const query = search.value.trim().toLocaleLowerCase();
+        let visibleCount = 0;
+        for (const card of cards) {
+          const statusMatches = activeFilter === "all" || card.dataset.status === activeFilter;
+          const textMatches = card.textContent.toLocaleLowerCase().includes(query);
+          const visible = statusMatches && textMatches;
+          card.hidden = !visible;
+          if (visible) visibleCount += 1;
+        }
+        for (const section of document.querySelectorAll(".section")) {
+          section.hidden = !section.querySelector(".card:not([hidden])");
+        }
+        empty.style.display = visibleCount === 0 ? "block" : "none";
+      }
+
+      filters.forEach((button) => button.addEventListener("click", () => {
+        activeFilter = button.dataset.filter;
+        filters.forEach((item) => item.setAttribute("aria-pressed", String(item === button)));
+        update();
+      }));
+      search.addEventListener("input", update);
+    })();
+  </script>
+</body>
+</html>

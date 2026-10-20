@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Skratch
+Comment=Music player
+Exec=/home/skuffed/Skratch/target/release/skratch
+TryExec=/home/skuffed/Skratch/target/release/skratch
+Icon=audio-player
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=Music;Audio;Player;Library;

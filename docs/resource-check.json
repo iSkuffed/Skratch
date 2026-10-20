@@ -1,0 +1,25 @@
+{
+  "idle_app": {
+    "Rss": "87524 kB",
+    "Pss": "54486 kB"
+  },
+  "idle_children": [],
+  "resumed_position_us": 4944193,
+  "seek_position_us": 6944193,
+  "paused_app": {
+    "Rss": "89816 kB",
+    "Pss": "56626 kB"
+  },
+  "playback_children": [
+    {
+      "Rss": "119440 kB",
+      "Pss": "56937 kB"
+    }
+  ],
+  "after_stop_app": {
+    "Rss": "89816 kB",
+    "Pss": "56788 kB"
+  },
+  "after_stop_children": [],
+  "double_click_metadata": "(<{'mpris:length': <int64 15000000>, 'mpris:artUrl': <'file:///tmp/skratch-desktop-qa-q26uqz9o/data/artwork/3.png'>, 'mpris:trackid': <objectpath '/'>, 'xesam:title': <'After Hours'>, 'xesam:artist': <['Skratch QA']>, 'xesam:album': <'Amber Rooms'>}>,)"
+}
