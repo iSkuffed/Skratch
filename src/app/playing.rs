@@ -275,16 +275,25 @@ impl Skratch {
                 .collect()
         };
         let current = self.state.queue.current_id();
+        let now = ui.input(|i| i.time);
+        let bounds = ui.available_rect_before_wrap();
+        let browsing = ui.rect_contains_pointer(bounds);
         let mut area = egui::ScrollArea::vertical()
             .id_salt(("now-list", panel as u8))
             .auto_shrink(false);
         if self.listed != current {
+            // Follow the playing track, except when the user is looking through the list or
+            // just clicked a row here (that row is already in view). `None` means the panel
+            // was just opened, which always scrolls.
+            let stay = self.listed.is_some() && (browsing || now < self.list_hold);
             self.listed = current;
             let at = rows
                 .iter()
                 .position(|(i, ..)| Some(self.tracks[*i].id) == current);
-            if let Some(at) = at {
-                area = area.vertical_scroll_offset((at as f32 * 40.0 - 80.0).max(0.0));
+            if let (false, Some(at)) = (stay, at) {
+                let stride = 40.0 + ui.spacing().item_spacing.y;
+                let centred = at as f32 * stride + stride / 2.0 - bounds.height() / 2.0;
+                area = area.vertical_scroll_offset(centred.max(0.0));
             }
         }
         area.show_rows(ui, 40.0, rows.len(), |ui, range| {
@@ -293,5 +302,8 @@ impl Skratch {
                 self.track_row(ui, index, queue, context);
             }
         });
+        if browsing && ui.input(|i| i.pointer.any_click()) {
+            self.list_hold = now + 1.0;
+        }
     }
 }

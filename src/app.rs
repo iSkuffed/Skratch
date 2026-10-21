@@ -213,6 +213,8 @@ pub struct Skratch {
     lyrics: lyrics::Lookup,
     /// The track the Now playing list was last scrolled to, so it follows track changes.
     listed: Option<i64>,
+    /// Until this time (egui seconds) a track change counts as caused by a click in that list.
+    list_hold: f64,
 }
 
 impl Skratch {
@@ -310,6 +312,7 @@ impl Skratch {
             reactive: Reactive::default(),
             lyrics: lyrics::Lookup::default(),
             listed: None,
+            list_hold: 0.0,
         };
         app.refresh_tools();
         app
