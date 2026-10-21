@@ -159,6 +159,11 @@ impl Reactive {
         &self.peaks
     }
 
+    /// The playback position, running on between the player's reports.
+    pub fn now(&self) -> f64 {
+        self.anchor.0 + self.anchor.1.elapsed().as_secs_f64().min(0.5)
+    }
+
     /// The smoothed bass level (0 to 1) for this frame. Until the analysis finishes, or for
     /// formats the decoder lacks, the level stays at zero.
     pub fn level(&mut self, ctx: &egui::Context, path: &Path, position: f64, playing: bool) -> f32 {
@@ -166,7 +171,7 @@ impl Reactive {
         if position != self.anchor.0 {
             self.anchor = (position, Instant::now());
         }
-        let now = position + self.anchor.1.elapsed().as_secs_f64().min(0.5);
+        let now = self.now();
         let target = match self.levels.get((now * RATE as f64) as usize) {
             Some(level) if playing => *level,
             _ => 0.0,

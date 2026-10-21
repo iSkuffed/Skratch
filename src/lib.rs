@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod download;
 pub mod library;
+pub mod lyrics;
 pub mod media;
 pub mod model;
 pub mod online;

@@ -2,7 +2,8 @@
 //! between the track details, the queue and the whole library.
 use super::{Action, Skratch, display};
 use crate::{state::NowPanel, style};
-use eframe::egui::{self, RichText, Sense, pos2, vec2};
+use eframe::egui::{self, Align, RichText, Sense, pos2, vec2};
+use skratch::lyrics::{Lyrics, Status};
 
 impl Skratch {
     pub(super) fn playing_ui(&mut self, ui: &mut egui::Ui) {
@@ -100,6 +101,7 @@ impl Skratch {
         ui.horizontal(|ui| {
             let heading = match panel {
                 NowPanel::Details => "NOW PLAYING",
+                NowPanel::Lyrics => "LYRICS",
                 NowPanel::UpNext => "UP NEXT",
                 NowPanel::Library => "LIBRARY",
             };
@@ -126,10 +128,10 @@ impl Skratch {
             });
         });
         ui.add_space(4.0);
-        if panel == NowPanel::Details {
-            self.details(ui, track);
-        } else {
-            self.panel_list(ui, panel);
+        match panel {
+            NowPanel::Details => self.details(ui, track),
+            NowPanel::Lyrics => self.lyrics(ui, track),
+            _ => self.panel_list(ui, panel),
         }
     }
 
@@ -155,6 +157,94 @@ impl Skratch {
         if !album.is_empty() {
             ui.add_space(6.0);
             ui.label(RichText::new(album).size(16.0).color(style::CREAM_DIM));
+        }
+    }
+
+    /// Synced lyrics follow the song (click a line to jump there); plain ones just scroll.
+    fn lyrics(&mut self, ui: &mut egui::Ui, track: &skratch::model::Track) {
+        let dir = self.data_dir.join("lyrics");
+        self.lyrics
+            .update(ui.ctx(), track, &dir, self.state.lyrics_online);
+        let now = if self.playing {
+            self.reactive.now()
+        } else {
+            self.state.position
+        };
+        let height = ui.available_height();
+        let dim = |text: String| RichText::new(text).size(18.0).color(style::CREAM_DIM);
+        match &self.lyrics.status {
+            Status::Loading => {
+                ui.add_space(8.0);
+                ui.label(dim("Looking for lyrics...".into()));
+            }
+            Status::Found(Lyrics::Plain(text)) => {
+                egui::ScrollArea::vertical()
+                    .id_salt("lyrics")
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        for line in text.lines() {
+                            ui.label(RichText::new(line).size(18.0).color(style::CREAM));
+                        }
+                    });
+            }
+            Status::Found(Lyrics::Synced(lines)) => {
+                let current = lines.partition_point(|(t, _)| *t <= now).checked_sub(1);
+                egui::ScrollArea::vertical()
+                    .id_salt("lyrics")
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        ui.add_space(height / 3.0);
+                        for (i, (time, text)) in lines.iter().enumerate() {
+                            if text.is_empty() {
+                                ui.add_space(14.0);
+                                continue;
+                            }
+                            let here = Some(i) == current;
+                            let rich = RichText::new(text).size(if here { 26.0 } else { 19.0 });
+                            let line = ui
+                                .add(
+                                    egui::Label::new(if here {
+                                        rich.strong().color(self.accent)
+                                    } else {
+                                        rich.color(style::CREAM_DIM)
+                                    })
+                                    .sense(Sense::click()),
+                                )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if line.clicked() {
+                                self.action = Some(Action::Seek(*time));
+                            }
+                            if here && self.lyrics.scrolled != current {
+                                line.scroll_to_me(Some(Align::Center));
+                            }
+                        }
+                        ui.add_space(height / 3.0);
+                    });
+                self.lyrics.scrolled = current;
+            }
+            Status::Missing | Status::Failed(_) => {
+                ui.add_space(8.0);
+                if let Status::Failed(error) = &self.lyrics.status {
+                    ui.label(dim(format!("Could not look lyrics up: {error}")));
+                    if ui.button("Try again").clicked() {
+                        self.lyrics.retry();
+                    }
+                } else if self.state.lyrics_online {
+                    ui.label(dim("No lyrics found for this track.".into()));
+                } else {
+                    ui.label(dim("No lyrics in the file or beside it (a .lrc file).".into()));
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(
+                            "Skratch can look them up on lrclib.net, a free community lyrics \
+                             database. That sends the artist, title, album and length.",
+                        )
+                        .color(style::CREAM_DIM),
+                    );
+                }
+                ui.add_space(8.0);
+                ui.checkbox(&mut self.state.lyrics_online, "Look up lyrics online");
+            }
         }
     }
 

@@ -7,6 +7,7 @@ use crate::{
 use eframe::egui::{self, Color32, CornerRadius, Frame, Margin, RichText};
 use skratch::{
     analysis::Reactive,
+    lyrics,
     download::{DownloadEvent, DownloadFormat, DownloadRequest, Downloader},
     media::{DesktopControls, MediaCommand},
     model::{MetadataEdit, Track},
@@ -209,6 +210,7 @@ pub struct Skratch {
     spin_speed: f32,
     arm: f32,
     reactive: Reactive,
+    lyrics: lyrics::Lookup,
     /// The track the Now playing list was last scrolled to, so it follows track changes.
     listed: Option<i64>,
 }
@@ -306,6 +308,7 @@ impl Skratch {
             spin_speed: 0.0,
             arm: 0.0,
             reactive: Reactive::default(),
+            lyrics: lyrics::Lookup::default(),
             listed: None,
         };
         app.refresh_tools();
@@ -880,6 +883,8 @@ impl Skratch {
                 section(ui, "SETTINGS", true);
                 ui.checkbox(&mut self.state.double_click, "Double-click to play")
                     .on_hover_text("Off: a single click starts a track.");
+                ui.checkbox(&mut self.state.lyrics_online, "Look up lyrics online")
+                    .on_hover_text("Missing lyrics are fetched from lrclib.net, which is sent the artist, title, album and length.");
                 if ui.button("Run setup again").clicked() {
                     self.open_setup(false);
                 }

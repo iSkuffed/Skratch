@@ -31,7 +31,7 @@ fn agent() -> &'static ureq::Agent {
     })
 }
 
-fn get_json(url: &str, query: &[(&str, &str)]) -> Result<Value> {
+pub(crate) fn get_json(url: &str, query: &[(&str, &str)]) -> Result<Value> {
     let mut request = agent().get(url);
     for (key, value) in query {
         request = request.query(key, value);

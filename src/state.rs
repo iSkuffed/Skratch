@@ -8,16 +8,18 @@ use std::{fs, io::Write, path::Path};
 pub enum NowPanel {
     #[default]
     Details,
+    Lyrics,
     UpNext,
     Library,
 }
 
 impl NowPanel {
-    pub const ALL: [Self; 3] = [Self::Details, Self::UpNext, Self::Library];
+    pub const ALL: [Self; 4] = [Self::Details, Self::Lyrics, Self::UpNext, Self::Library];
 
     pub fn title(self) -> &'static str {
         match self {
             Self::Details => "Details",
+            Self::Lyrics => "Lyrics",
             Self::UpNext => "Up next",
             Self::Library => "Library",
         }
@@ -41,6 +43,8 @@ pub struct SavedState {
     /// The first-run setup page has been shown (and dismissed) once.
     pub setup_done: bool,
     pub now_panel: NowPanel,
+    /// Missing lyrics may be looked up on lrclib.net; off until the user allows it.
+    pub lyrics_online: bool,
 }
 
 impl SavedState {
