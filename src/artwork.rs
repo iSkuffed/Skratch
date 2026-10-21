@@ -125,11 +125,11 @@ impl Artwork {
     pub fn texture(&mut self, path: &Path) -> Option<TextureId> {
         if let Some(texture) = self.textures.get(path) {
             // Most recently used goes last, so eviction never takes what is on screen.
-            if self.order.back().map(PathBuf::as_path) != Some(path) {
-                if let Some(at) = self.order.iter().position(|p| p == path) {
-                    let path = self.order.remove(at).expect("position is in range");
-                    self.order.push_back(path);
-                }
+            if self.order.back().map(PathBuf::as_path) != Some(path)
+                && let Some(at) = self.order.iter().position(|p| p == path)
+            {
+                let path = self.order.remove(at).expect("position is in range");
+                self.order.push_back(path);
             }
             return texture.as_ref().map(TextureHandle::id);
         }

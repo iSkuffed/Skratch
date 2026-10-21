@@ -101,6 +101,8 @@ enum CoverMsg {
     Found(Result<Vec<Candidate>, String>),
     Thumb(usize, Option<egui::ColorImage>),
     Full(Result<Vec<u8>, String>),
+    /// The file dialog was closed without choosing anything.
+    Cancelled,
 }
 struct Found {
     candidate: Candidate,
@@ -1798,14 +1800,18 @@ impl Skratch {
                 CoverMsg::Full(Ok(bytes)) => downloaded = Some(bytes),
                 CoverMsg::Full(Err(error)) => {
                     cover.working = false;
-                    cover.status = format!("Could not download that cover: {error}");
+                    cover.status = format!("Could not use that cover: {error}");
+                }
+                CoverMsg::Cancelled => {
+                    cover.working = false;
+                    cover.status.clear();
                 }
             }
         }
         let embed = &mut self.state.embed_cover;
         let accent = self.accent;
-        let (mut open, mut search, mut apply, mut cancel, mut skip) =
-            (true, false, false, false, false);
+        let (mut open, mut search, mut apply, mut cancel, mut skip, mut pick) =
+            (true, false, false, false, false, false);
         egui::Window::new("Find cover online")
             .open(&mut open)
             .default_pos(ctx.content_rect().center() - egui::vec2(350.0, 250.0))
@@ -1823,6 +1829,9 @@ impl Skratch {
                     let enter = (a.lost_focus() || b.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     if (ui.add_enabled(!cover.working, egui::Button::new("Search")).clicked() || enter) && !cover.working {
                         search = true;
+                    }
+                    if ui.add_enabled(!cover.working, egui::Button::new("Choose image file...")).clicked() {
+                        pick = true;
                     }
                 });
                 if !cover.status.is_empty() {
@@ -1891,6 +1900,24 @@ impl Skratch {
             cover.chosen = None;
             cover.working = true;
             cover.status = "Searching...".into();
+        } else if pick {
+            let (tx, rx) = mpsc::channel();
+            let wake = wake.clone();
+            std::thread::spawn(move || {
+                let message = match rfd::FileDialog::new()
+                    .set_title("Choose a cover image")
+                    .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
+                    .pick_file()
+                {
+                    Some(path) => CoverMsg::Full(read_cover_file(&path)),
+                    None => CoverMsg::Cancelled,
+                };
+                let _ = tx.send(message);
+                wake();
+            });
+            cover.rx = Some(rx);
+            cover.working = true;
+            cover.status = "Waiting for you to choose a file...".into();
         } else if apply && let Some(found) = cover.chosen.and_then(|i| cover.found.get(i)) {
             let url = found.candidate.full.clone();
             let (tx, rx) = mpsc::channel();
@@ -2090,6 +2117,16 @@ fn spawn_cover_search(
         }
     });
     rx
+}
+
+/// Reads a cover image the user picked, refusing anything unreasonably large.
+fn read_cover_file(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    const MAX: u64 = 50 * 1024 * 1024;
+    let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if size > MAX {
+        return Err("that file is over 50 MB".into());
+    }
+    std::fs::read(path).map_err(|e| e.to_string())
 }
 
 /// A sidebar section heading: a divider line (except for the first) and a small caps label.
