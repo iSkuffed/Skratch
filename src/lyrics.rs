@@ -35,6 +35,42 @@ impl Lyrics {
     }
 }
 
+impl Lyrics {
+    /// The text form the editor shows and `from_text` reads back.
+    pub fn to_text(&self) -> String {
+        match self {
+            Self::Plain(text) => text.clone(),
+            Self::Synced(lines) => lines
+                .iter()
+                .map(|(t, text)| format!("[{:02}:{:05.2}]{text}\n", (*t / 60.0) as u32, t % 60.0))
+                .collect(),
+        }
+    }
+}
+
+/// Puts a `[mm:ss.xx]` stamp at the start of the line holding char index `cursor` (replacing
+/// any it already has) and returns the new text with the cursor moved to the next line.
+pub fn stamp_line(text: &str, cursor: usize, seconds: f64) -> (String, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let cursor = cursor.min(chars.len());
+    let start = chars[..cursor].iter().rposition(|c| *c == '\n').map_or(0, |i| i + 1);
+    let end = chars[cursor..].iter().position(|c| *c == '\n').map_or(chars.len(), |i| cursor + i);
+    let line: String = chars[start..end].iter().collect();
+    let mut rest = line.trim_start();
+    while let Some(tail) = rest.strip_prefix('[') {
+        match tail.find(']') {
+            Some(close) if stamp(&tail[..close]).is_some() => rest = tail[close + 1..].trim_start(),
+            _ => break,
+        }
+    }
+    let stamped = format!("[{:02}:{:05.2}]{rest}", (seconds / 60.0) as u32, seconds % 60.0);
+    let before: String = chars[..start].iter().collect();
+    let after: String = chars[end..].iter().collect();
+    let next = before.chars().count() + stamped.chars().count() + 1;
+    let after = if after.is_empty() { "\n".to_string() } else { after };
+    (format!("{before}{stamped}{after}"), next)
+}
+
 /// Reads an LRC file. A line may carry several stamps; tags like `[ar:Artist]` are skipped
 /// and word-by-word `<mm:ss.xx>` stamps are dropped.
 pub fn parse_lrc(text: &str) -> Vec<(f64, String)> {
@@ -138,7 +174,32 @@ fn cache_file(dir: &Path, track: &Track) -> PathBuf {
     dir.join(format!("{name}.json"))
 }
 
+/// The user's own lyrics for a track (typed, imported, or empty for "none"). They win over
+/// everything else and live in the app's data, so no music file is touched.
+fn user_file(dir: &Path, track: &Track) -> PathBuf {
+    cache_file(dir, track).with_extension("user.txt")
+}
+
+/// Keeps `text` as this track's lyrics; empty text means "no lyrics, stop looking".
+pub fn save(dir: &Path, track: &Track, text: &str) -> std::io::Result<()> {
+    fs::create_dir_all(dir)?;
+    fs::write(user_file(dir, track), text)
+}
+
+/// Drops the user's version and the remembered online answer, so the next lookup starts over.
+pub fn restore(dir: &Path, track: &Track) {
+    let _ = fs::remove_file(user_file(dir, track));
+    let _ = fs::remove_file(cache_file(dir, track));
+}
+
+pub fn has_user_version(dir: &Path, track: &Track) -> bool {
+    user_file(dir, track).exists()
+}
+
 fn find(track: &Track, dir: &Path, online: bool) -> Result<Option<Lyrics>> {
+    if let Ok(text) = fs::read_to_string(user_file(dir, track)) {
+        return Ok(Lyrics::from_text(&text));
+    }
     if let Some(lyrics) = fs::read_to_string(track.path.with_extension("lrc"))
         .ok()
         .and_then(|text| Lyrics::from_text(&text))
@@ -168,17 +229,7 @@ fn find(track: &Track, dir: &Path, online: bool) -> Result<Option<Lyrics>> {
     }
     let lyrics = lrclib(track)?;
     let (synced, plain) = match &lyrics {
-        Some(Lyrics::Synced(lines)) => (
-            Some(
-                lines
-                    .iter()
-                    .map(|(t, text)| {
-                        format!("[{:02}:{:05.2}]{text}\n", (*t / 60.0) as u32, t % 60.0)
-                    })
-                    .collect::<String>(),
-            ),
-            None,
-        ),
+        Some(l @ Lyrics::Synced(_)) => (Some(l.to_text()), None),
         Some(Lyrics::Plain(text)) => (None, Some(text.clone())),
         None => (None, None),
     };
@@ -209,6 +260,10 @@ pub struct Lookup {
     pub status: Status,
     /// The synced line the panel last scrolled to.
     pub scrolled: Option<usize>,
+    /// The lyrics being typed or imported, while the editor is open.
+    pub editing: Option<String>,
+    /// A `.lrc`/`.txt` file the user is choosing to import.
+    pub picking: Option<Receiver<String>>,
 }
 
 impl Default for Lookup {
@@ -221,6 +276,8 @@ impl Default for Lookup {
             asked_online: false,
             status: Status::Loading,
             scrolled: None,
+            editing: None,
+            picking: None,
         }
     }
 }
@@ -236,6 +293,7 @@ impl Lookup {
             self.asked_online = online;
             self.status = Status::Loading;
             self.scrolled = None;
+            self.editing = None;
             self.spawn(ctx, track.clone(), dir.to_path_buf(), online);
         }
         while let Ok((path, _, result)) = self.rx.try_recv() {
@@ -302,6 +360,31 @@ mod tests {
         );
         assert_eq!(pick(&results, 30.0), None);
         assert_eq!(pick(&json!([]), 180.0), None);
+    }
+
+    #[test]
+    fn stamping_a_line_replaces_its_old_stamp_and_moves_on() {
+        let (text, next) = stamp_line("one\n[00:01.00]two\nthree", 6, 65.5);
+        assert_eq!(text, "one\n[01:05.50]two\nthree");
+        assert_eq!(next, 18);
+        let (text, next) = stamp_line("last", 2, 3.0);
+        assert_eq!(text, "[00:03.00]last\n");
+        assert_eq!(next, 15);
+    }
+
+    #[test]
+    fn user_lyrics_beat_a_sidecar_and_empty_means_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let song = dir.path().join("song.mp3");
+        fs::write(dir.path().join("song.lrc"), "[00:05.00]wrong").unwrap();
+        let track = Track { path: song, ..Track::default() };
+        let cache = dir.path().join("cache");
+        save(&cache, &track, "right words").unwrap();
+        assert_eq!(find(&track, &cache, false).unwrap(), Some(Lyrics::Plain("right words".into())));
+        save(&cache, &track, "").unwrap();
+        assert_eq!(find(&track, &cache, false).unwrap(), None);
+        restore(&cache, &track);
+        assert_eq!(find(&track, &cache, false).unwrap(), Some(Lyrics::Synced(vec![(5.0, "wrong".into())])));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::{
     artwork::Artwork,
     service::{self, Command, Event},
-    state::{Playlist, SavedState, Source},
+    state::{NowPanel, Playlist, SavedState, Source},
     style::{self, Icon},
 };
 use eframe::egui::{self, Color32, CornerRadius, Frame, Margin, RichText};
@@ -1116,15 +1116,22 @@ impl Skratch {
                 ui.horizontal(|ui| {
                     let (rect, response) =
                         ui.allocate_exact_size(egui::vec2(160.0, 112.0), egui::Sense::click());
-                    if response
+                    let response = response
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .on_hover_text("Open Now playing")
-                        .clicked()
-                    {
-                        self.view = View::Playing;
-                        self.selected_group = None;
-                        self.selected.clear();
-                        self.rebuild();
+                        .on_hover_text("Click for this track's options");
+                    if let Some(track) = &track {
+                        let menu = |this: &mut Self, ui: &mut egui::Ui| {
+                            if this.view != View::Playing && ui.button("Open Now playing").clicked() {
+                                this.view = View::Playing;
+                                this.selected_group = None;
+                                this.selected.clear();
+                                this.rebuild();
+                                ui.close();
+                            }
+                            this.track_actions(ui, &[track.id], true);
+                        };
+                        egui::Popup::menu(&response).show(|ui| menu(self, ui));
+                        egui::Popup::context_menu(&response).show(|ui| menu(self, ui));
                     }
                     let center = egui::pos2(rect.left() + 56.0, rect.center().y);
                     style::record(ui.painter(), center, 52.0, art, label, self.spin);
@@ -2421,7 +2428,10 @@ impl eframe::App for Skratch {
         self.poll_pick();
         self.visible.clear();
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
-            if matches!(self.view, View::Downloads | View::Playing) {
+            if self.view == View::Playing {
+                self.state.now_panel = NowPanel::Library;
+                self.listed = None;
+            } else if self.view == View::Downloads {
                 self.view = View::Tracks;
                 self.selected_group = None;
                 self.rebuild();

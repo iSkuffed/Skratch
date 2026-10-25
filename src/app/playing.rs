@@ -6,7 +6,11 @@ use crate::{
     style,
 };
 use eframe::egui::{self, Align, RichText, Sense, pos2, vec2};
-use skratch::lyrics::{Lyrics, Status};
+use eframe::egui::text::{CCursor, CCursorRange};
+use skratch::{
+    lyrics::{self, Lyrics, Status},
+    model::Track,
+};
 
 impl Skratch {
     pub(super) fn playing_ui(&mut self, ui: &mut egui::Ui) {
@@ -128,6 +132,9 @@ impl Skratch {
                             }
                         }
                     });
+                if panel == NowPanel::Lyrics {
+                    ui.menu_button("...", |ui| self.lyrics_menu(ui, track));
+                }
             });
         });
         ui.add_space(4.0);
@@ -163,6 +170,122 @@ impl Skratch {
         }
     }
 
+    /// Fix wrong lyrics: type them, bring them in from a file, drop them, or go back to the
+    /// automatic ones. Kept in the app's data, so the music files stay as they are.
+    fn lyrics_menu(&mut self, ui: &mut egui::Ui, track: &Track) {
+        let dir = self.data_dir.join("lyrics");
+        if ui.button("Edit lyrics").clicked() {
+            self.lyrics.editing = Some(match &self.lyrics.status {
+                Status::Found(found) => found.to_text(),
+                _ => String::new(),
+            });
+            ui.close();
+        }
+        if ui.button("Import from file...").clicked() {
+            self.import_lyrics_file(ui.ctx());
+            ui.close();
+        }
+        if ui
+            .button("Clear lyrics")
+            .on_hover_text("Wrong lyrics: forget them and stop looking for this track")
+            .clicked()
+        {
+            self.save_lyrics(&dir, track, "");
+            ui.close();
+        }
+        if lyrics::has_user_version(&dir, track)
+            && ui
+                .button("Back to automatic lyrics")
+                .on_hover_text("Drop what was typed, imported or cleared and look again")
+                .clicked()
+        {
+            lyrics::restore(&dir, track);
+            self.lyrics.retry();
+            ui.close();
+        }
+    }
+
+    fn save_lyrics(&mut self, dir: &std::path::Path, track: &Track, text: &str) {
+        match lyrics::save(dir, track, text) {
+            Ok(()) => self.lyrics.retry(),
+            Err(error) => self.message(format!("Could not save the lyrics: {error}")),
+        }
+    }
+
+    fn import_lyrics_file(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.lyrics.picking = Some(rx);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let chosen = rfd::FileDialog::new()
+                .set_title("Choose a lyrics file")
+                .add_filter("Lyrics", &["lrc", "txt"])
+                .pick_file();
+            // lyrics are small; anything big is not lyrics
+            if let Some(text) = chosen
+                .filter(|p| std::fs::metadata(p).is_ok_and(|m| m.len() < 1 << 20))
+                .and_then(|p| std::fs::read_to_string(p).ok())
+            {
+                let _ = tx.send(text);
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    /// Text box for the lyrics, plain or `[mm:ss.xx]` timed. While the song plays, Stamp puts
+    /// the current time on the line under the cursor and moves to the next, to time them by ear.
+    fn lyrics_editor(&mut self, ui: &mut egui::Ui, track: &Track, mut text: String, now: f64) {
+        let (id, dir) = (egui::Id::new("lyrics-edit"), self.data_dir.join("lyrics"));
+        let stamp_key = ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter));
+        ui.label(
+            RichText::new(
+                "One line per lyric. Add [mm:ss.xx] to the start of a line to make it follow the song.",
+            )
+            .small()
+            .color(style::CREAM_DIM),
+        );
+        let room = (ui.available_height() - 48.0).max(80.0);
+        egui::ScrollArea::vertical().max_height(room).show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(&mut text)
+                    .id(id)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(14),
+            );
+        });
+        let (mut save, mut cancel, mut stamp) = (false, false, stamp_key);
+        ui.horizontal(|ui| {
+            save = ui.button("Save").clicked();
+            cancel = ui.button("Cancel").clicked();
+            stamp |= ui
+                .button("Stamp line")
+                .on_hover_text("Ctrl+Enter: put the song's current time on this line")
+                .clicked();
+            if ui.button("Import from file...").clicked() {
+                self.import_lyrics_file(ui.ctx());
+            }
+        });
+        if stamp {
+            let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+            let at = state
+                .cursor
+                .char_range()
+                .map_or(text.chars().count(), |r| r.primary.index);
+            let (stamped, next) = lyrics::stamp_line(&text, at, now);
+            text = stamped;
+            state
+                .cursor
+                .set_char_range(Some(CCursorRange::one(CCursor::new(next))));
+            state.store(ui.ctx(), id);
+            ui.memory_mut(|m| m.request_focus(id));
+        }
+        if save {
+            self.save_lyrics(&dir, track, &text);
+        } else if !cancel {
+            self.lyrics.editing = Some(text);
+        }
+    }
+
     /// Synced lyrics follow the song (click a line to jump there); plain ones just scroll.
     fn lyrics(&mut self, ui: &mut egui::Ui, track: &skratch::model::Track) {
         let dir = self.data_dir.join("lyrics");
@@ -173,6 +296,21 @@ impl Skratch {
         } else {
             self.state.position
         };
+        if let Some(rx) = &self.lyrics.picking {
+            match rx.try_recv() {
+                Ok(text) => {
+                    self.lyrics.picking = None;
+                    self.lyrics.editing = Some(text);
+                }
+                // the dialog was cancelled
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.lyrics.picking = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if let Some(text) = self.lyrics.editing.take() {
+            self.lyrics_editor(ui, track, text, now);
+            return;
+        }
         let height = ui.available_height();
         let dim = |text: String| RichText::new(text).size(18.0).color(style::CREAM_DIM);
         match &self.lyrics.status {
@@ -248,6 +386,15 @@ impl Skratch {
                     );
                 }
                 ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Type lyrics").clicked() {
+                        self.lyrics.editing = Some(String::new());
+                    }
+                    if ui.button("Import from file...").clicked() {
+                        self.import_lyrics_file(ui.ctx());
+                    }
+                });
+                ui.add_space(8.0);
                 ui.checkbox(&mut self.state.lyrics_online, "Look up lyrics online");
             }
         }
@@ -267,7 +414,8 @@ impl Skratch {
         } else {
             let search = ui.add(
                 egui::TextEdit::singleline(&mut self.search)
-                    .hint_text("Search library")
+                    .id(super::SEARCH_ID.into())
+                    .hint_text("Search library  (Ctrl+F)")
                     .desired_width(f32::INFINITY),
             );
             if search.changed() {
