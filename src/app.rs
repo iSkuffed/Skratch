@@ -1118,19 +1118,16 @@ impl Skratch {
                         ui.allocate_exact_size(egui::vec2(160.0, 112.0), egui::Sense::click());
                     let response = response
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .on_hover_text("Click for this track's options");
+                        .on_hover_text("Open Now playing  (right-click for options)");
+                    if response.clicked() {
+                        self.view = View::Playing;
+                        self.selected_group = None;
+                        self.selected.clear();
+                        self.rebuild();
+                    }
                     if let Some(track) = &track {
-                        let menu = |this: &mut Self, ui: &mut egui::Ui| {
-                            if this.view != View::Playing && ui.button("Open Now playing").clicked() {
-                                this.view = View::Playing;
-                                this.selected_group = None;
-                                this.selected.clear();
-                                this.rebuild();
-                                ui.close();
-                            }
-                            this.track_actions(ui, &[track.id], true);
-                        };
-                        egui::Popup::menu(&response).show(|ui| menu(self, ui));
+                        egui::Popup::context_menu(&response)
+                            .show(|ui| self.track_actions(ui, &[track.id], true));
                     }
                     let center = egui::pos2(rect.left() + 56.0, rect.center().y);
                     style::record(ui.painter(), center, 52.0, art, label, self.spin);
