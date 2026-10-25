@@ -26,9 +26,20 @@ impl NowPanel {
     }
 }
 
+/// Where the queue came from, so searching the library while playing keeps to it.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub enum Source {
+    /// Every track, in the library's sort order.
+    #[default]
+    Library,
+    /// An album, artist or playlist: just these tracks, in this order.
+    Tracks(Vec<i64>),
+}
+
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SavedState {
+    pub source: Source,
     pub queue: Queue,
     pub position: f64,
     pub volume: f64,

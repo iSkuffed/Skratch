@@ -1,7 +1,10 @@
 //! The "Now playing" page: a big spinning record next to a panel the user can switch
 //! between the track details, the queue and the whole library.
 use super::{Action, Skratch, display};
-use crate::{state::NowPanel, style};
+use crate::{
+    state::{NowPanel, Source},
+    style,
+};
 use eframe::egui::{self, Align, RichText, Sense, pos2, vec2};
 use skratch::lyrics::{Lyrics, Status};
 
@@ -232,7 +235,9 @@ impl Skratch {
                 } else if self.state.lyrics_online {
                     ui.label(dim("No lyrics found for this track.".into()));
                 } else {
-                    ui.label(dim("No lyrics in the file or beside it (a .lrc file).".into()));
+                    ui.label(dim(
+                        "No lyrics in the file or beside it (a .lrc file).".into()
+                    ));
                     ui.add_space(8.0);
                     ui.label(
                         RichText::new(
@@ -268,11 +273,37 @@ impl Skratch {
             if search.changed() {
                 self.rebuild();
             }
-            self.filtered
-                .iter()
-                .enumerate()
-                .map(|(r, i)| (*i, None, r))
-                .collect()
+            // Search within what is playing: an album or playlist stays an album or playlist.
+            let matching: std::collections::HashSet<usize> =
+                self.filtered.iter().copied().collect();
+            match &self.state.source {
+                Source::Library => self
+                    .filtered
+                    .iter()
+                    .enumerate()
+                    .map(|(r, i)| (*i, None, r))
+                    .collect(),
+                Source::Tracks(ids) => {
+                    let rows = ids
+                        .iter()
+                        .filter_map(|id| self.by_id.get(id))
+                        .filter(|i| matching.contains(i))
+                        .enumerate()
+                        .map(|(r, i)| (*i, None, r))
+                        .collect();
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Searching what is playing")
+                                .small()
+                                .color(style::CREAM_DIM),
+                        );
+                        if ui.small_button("All tracks").clicked() {
+                            self.state.source = Source::Library;
+                        }
+                    });
+                    rows
+                }
+            }
         };
         let current = self.state.queue.current_id();
         let now = ui.input(|i| i.time);

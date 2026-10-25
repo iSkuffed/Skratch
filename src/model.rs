@@ -17,7 +17,7 @@ pub struct Track {
     pub artwork: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct MetadataEdit {
     pub title: String,
     pub artist: String,

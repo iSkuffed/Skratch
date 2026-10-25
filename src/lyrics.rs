@@ -1,8 +1,8 @@
 //! Lyrics for the Now playing panel. Looked up in order: a `.lrc` file next to the track,
 //! lyrics in the file's own tags, a local cache, and (only when the user allows it) LRCLIB.
 use crate::{model::Track, online, tagparse};
-use eframe::egui;
 use anyhow::Result;
+use eframe::egui;
 use lofty::{prelude::*, tag::ItemKey};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -183,8 +183,12 @@ fn find(track: &Track, dir: &Path, online: bool) -> Result<Option<Lyrics>> {
         None => (None, None),
     };
     // a failed cache write only costs a repeat lookup next time
-    let _ = fs::create_dir_all(dir)
-        .and_then(|()| fs::write(&cache, json!({"synced": synced, "plain": plain}).to_string()));
+    let _ = fs::create_dir_all(dir).and_then(|()| {
+        fs::write(
+            &cache,
+            json!({"synced": synced, "plain": plain}).to_string(),
+        )
+    });
     Ok(lyrics)
 }
 

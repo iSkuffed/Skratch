@@ -162,6 +162,102 @@ fn parse_musicbrainz(json: &Value) -> Vec<Candidate> {
         .collect()
 }
 
+/// True when the server said it is busy (503 or 429), so the same request may work shortly.
+pub fn is_busy(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<ureq::Error>(),
+        Some(ureq::Error::StatusCode(503 | 429))
+    )
+}
+
+/// What MusicBrainz knows about one recording.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagMatch {
+    pub artist: String,
+    pub title: String,
+    pub album: String,
+    pub year: Option<u32>,
+    pub track_number: Option<u32>,
+    /// A high search score and a matching length, so safe to apply without a second look.
+    pub strong: bool,
+}
+
+/// Looks one track up by artist and title. `seconds` (0 when unknown) is checked against the
+/// recording's length. `Ok(None)` when MusicBrainz has nothing.
+pub fn lookup_tags(artist: &str, title: &str, seconds: f64) -> Result<Option<TagMatch>> {
+    let clean = |text: &str| text.replace(['"', '\\'], " ");
+    let mut query = vec![format!("recording:\"{}\"", clean(title.trim()))];
+    if !artist.trim().is_empty() {
+        query.push(format!("artist:\"{}\"", clean(artist.trim())));
+    }
+    let json = get_json(
+        "https://musicbrainz.org/ws/2/recording/",
+        &[
+            ("query", &query.join(" AND ")),
+            ("fmt", "json"),
+            ("limit", "5"),
+        ],
+    )?;
+    Ok(parse_recordings(&json, seconds))
+}
+
+fn parse_recordings(json: &Value, seconds: f64) -> Option<TagMatch> {
+    let length_fits = |recording: &Value| {
+        seconds < 1.0
+            || recording["length"]
+                .as_f64()
+                .is_none_or(|ms| (ms / 1000.0 - seconds).abs() <= 5.0)
+    };
+    let recordings = json["recordings"].as_array()?;
+    let recording = recordings
+        .iter()
+        .find(|r| length_fits(r))
+        .or_else(|| recordings.first())?;
+    let artist: String = recording["artist-credit"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|credit| {
+            format!(
+                "{}{}",
+                credit["name"].as_str().unwrap_or(""),
+                credit["joinphrase"].as_str().unwrap_or("")
+            )
+        })
+        .collect();
+    // prefer an official studio album, then the earliest release
+    let release = recording["releases"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .min_by_key(|release| {
+            let group = &release["release-group"];
+            let studio = group["primary-type"].as_str() == Some("Album")
+                && group["secondary-types"]
+                    .as_array()
+                    .is_none_or(|types| types.is_empty());
+            (
+                release["status"].as_str() != Some("Official"),
+                !studio,
+                release["date"].as_str().unwrap_or("9999").to_owned(),
+            )
+        });
+    let date = release.and_then(|r| r["date"].as_str());
+    Some(TagMatch {
+        artist,
+        title: recording["title"].as_str()?.to_owned(),
+        album: release
+            .and_then(|r| r["title"].as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        year: date.and_then(|d| d.get(..4)).and_then(|y| y.parse().ok()),
+        track_number: release
+            .and_then(|r| r["media"][0]["track"][0]["number"].as_str())
+            .and_then(|n| n.parse().ok()),
+        strong: recording["score"].as_u64().unwrap_or(0) >= 90 && length_fits(recording),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +290,27 @@ mod tests {
             found[0].thumb,
             "https://coverartarchive.org/release-group/abc/front-250"
         );
+    }
+
+    #[test]
+    fn recording_prefers_matching_length_and_the_studio_album() {
+        let json = json!({"recordings": [
+            {"title": "Song", "score": 100, "length": 90000, "artist-credit": [{"name": "A"}]},
+            {"title": "Song", "score": 95, "length": 200000,
+             "artist-credit": [{"name": "A", "joinphrase": " feat. "}, {"name": "B"}],
+             "releases": [
+                {"title": "Hits", "status": "Official", "date": "2021-01-01",
+                 "release-group": {"primary-type": "Album", "secondary-types": ["Compilation"]}},
+                {"title": "Studio", "status": "Official", "date": "2019-05-02",
+                 "release-group": {"primary-type": "Album"},
+                 "media": [{"track": [{"number": "7"}]}]}]}]});
+        let found = parse_recordings(&json, 201.0).unwrap();
+        assert_eq!(found.artist, "A feat. B");
+        assert_eq!(found.album, "Studio");
+        assert_eq!((found.year, found.track_number), (Some(2019), Some(7)));
+        assert!(found.strong);
+        // wrong length: still offered, but not strong
+        assert!(!parse_recordings(&json, 50.0).unwrap().strong);
     }
 
     #[test]

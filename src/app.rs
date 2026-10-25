@@ -1,14 +1,14 @@
 use crate::{
     artwork::Artwork,
     service::{self, Command, Event},
-    state::SavedState,
+    state::{SavedState, Source},
     style::{self, Icon},
 };
 use eframe::egui::{self, Color32, CornerRadius, Frame, Margin, RichText};
 use skratch::{
     analysis::Reactive,
-    lyrics,
     download::{DownloadEvent, DownloadFormat, DownloadRequest, Downloader},
+    lyrics,
     media::{DesktopControls, MediaCommand},
     model::{MetadataEdit, Track},
     online::{self, Candidate},
@@ -24,6 +24,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod fetch;
 mod playing;
 mod setup;
 
@@ -150,6 +151,10 @@ impl CoverSearch {
 enum Action {
     FindCover(Vec<i64>),
     StartVisible(usize),
+    /// Play this track from the whole library, in sort order.
+    StartLibrary(i64),
+    /// Play this track from what the queue came from (the Now playing library panel).
+    StartScoped(i64),
     Enqueue(i64),
     Select(usize),
     Edit(i64),
@@ -201,8 +206,15 @@ pub struct Skratch {
     download_log: std::collections::VecDeque<String>,
     select_mode: bool,
     selected: HashSet<i64>,
+    /// The row last clicked, where a shift-click range starts.
+    anchor: Option<i64>,
+    /// The track ids in the list being shown this frame, in order.
+    visible: Vec<i64>,
+    /// A cover image being chosen for every selected track.
+    pick_rx: Option<mpsc::Receiver<Result<Option<Vec<u8>>, String>>>,
     fill_open: bool,
     cover: Option<CoverSearch>,
+    fetch: Option<fetch::TagFetch>,
     logo: eframe::egui::TextureHandle,
     accent: Color32,
     accent_applied: Color32,
@@ -301,8 +313,12 @@ impl Skratch {
             last_desktop: Instant::now(),
             select_mode: false,
             selected: HashSet::new(),
+            anchor: None,
+            visible: Vec::new(),
+            pick_rx: None,
             fill_open: false,
             cover: None,
+            fetch: None,
             logo: style::load_logo(&cc.egui_ctx),
             accent: style::ACCENT,
             accent_applied: style::ACCENT,
@@ -341,26 +357,9 @@ impl Skratch {
         }
     }
 
-    fn rebuild(&mut self) {
-        let selected = self
-            .selected_group
-            .and_then(|i| self.groups.get(i))
-            .map(|g| (g.name.clone(), g.subtitle.clone()));
-        let query = self.search.to_lowercase();
-        self.filtered = self
-            .tracks
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| {
-                query.is_empty()
-                    || [&t.title, &t.artist, &t.album, &t.album_artist, &t.genre]
-                        .iter()
-                        .any(|s| s.to_lowercase().contains(&query))
-                    || t.path.to_string_lossy().to_lowercase().contains(&query)
-            })
-            .map(|(i, _)| i)
-            .collect();
-        self.filtered.sort_by(|a, b| {
+    /// Sorts track indices by the chosen column.
+    fn sort_indices(&self, indices: &mut [usize]) {
+        indices.sort_by(|a, b| {
             let a = &self.tracks[*a];
             let b = &self.tracks[*b];
             let cmp = match self.sort {
@@ -390,6 +389,49 @@ impl Skratch {
             .then_with(|| a.path.cmp(&b.path));
             if self.descending { cmp.reverse() } else { cmp }
         });
+    }
+
+    fn start_action(&self, id: i64, queue_index: Option<usize>, context_index: usize) -> Action {
+        if let Some(q) = queue_index {
+            Action::Select(q)
+        } else if self.view == View::Playing {
+            Action::StartScoped(id)
+        } else if self.selected_group.is_none() {
+            Action::StartLibrary(id)
+        } else {
+            Action::StartVisible(context_index)
+        }
+    }
+
+    /// Every track id, in the library's sort order, ignoring any search.
+    fn library_ids(&self) -> Vec<i64> {
+        let mut all: Vec<usize> = (0..self.tracks.len()).collect();
+        self.sort_indices(&mut all);
+        all.into_iter().map(|i| self.tracks[i].id).collect()
+    }
+
+    fn rebuild(&mut self) {
+        let selected = self
+            .selected_group
+            .and_then(|i| self.groups.get(i))
+            .map(|g| (g.name.clone(), g.subtitle.clone()));
+        let query = self.search.to_lowercase();
+        self.filtered = self
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                query.is_empty()
+                    || [&t.title, &t.artist, &t.album, &t.album_artist, &t.genre]
+                        .iter()
+                        .any(|s| s.to_lowercase().contains(&query))
+                    || t.path.to_string_lossy().to_lowercase().contains(&query)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let mut filtered = std::mem::take(&mut self.filtered);
+        self.sort_indices(&mut filtered);
+        self.filtered = filtered;
         let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
         for i in &self.filtered {
             let t = &self.tracks[*i];
@@ -478,6 +520,19 @@ impl Skratch {
         self.last_desktop = Instant::now() - Duration::from_secs(2);
     }
 
+    /// Starts the queue from `source` at track `id`, falling back to the library when the
+    /// track is not part of it.
+    fn start_from(&mut self, id: i64, source: Source) {
+        let (source, ids) = match source {
+            Source::Tracks(ids) if ids.contains(&id) => (Source::Tracks(ids.clone()), ids),
+            _ => (Source::Library, self.library_ids()),
+        };
+        let index = ids.iter().position(|v| *v == id).unwrap_or(0);
+        self.state.source = source;
+        self.state.queue.start(ids, index);
+        self.start_current(0.0);
+    }
+
     fn perform(&mut self, action: Action) {
         let result = match action {
             Action::StartVisible(index) => {
@@ -486,9 +541,18 @@ impl Skratch {
                     .and_then(|i| self.groups.get(i))
                     .map(|g| &g.indices)
                     .unwrap_or(&self.filtered);
-                let ids = indices.iter().map(|i| self.tracks[*i].id).collect();
+                let ids: Vec<i64> = indices.iter().map(|i| self.tracks[*i].id).collect();
+                self.state.source = Source::Tracks(ids.clone());
                 self.state.queue.start(ids, index);
                 self.start_current(0.0);
+                Ok(())
+            }
+            Action::StartLibrary(id) => {
+                self.start_from(id, Source::Library);
+                Ok(())
+            }
+            Action::StartScoped(id) => {
+                self.start_from(id, self.state.source.clone());
                 Ok(())
             }
             Action::FindCover(ids) => {
@@ -1163,7 +1227,54 @@ impl Skratch {
     }
 
     /// "Select" toggle plus the batch actions, shown above any track list. `ids` are the visible tracks.
+    /// Asks for an image file; `poll_pick` applies it to the selected tracks.
+    fn pick_cover_file(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        self.pick_rx = Some(rx);
+        let wake = self.wake.clone();
+        std::thread::spawn(move || {
+            let chosen = rfd::FileDialog::new()
+                .set_title("Choose a cover image")
+                .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
+                .pick_file();
+            let _ = tx.send(chosen.map(|path| read_cover_file(&path)).transpose());
+            wake();
+        });
+    }
+
+    fn poll_pick(&mut self) {
+        let Some(result) = self.pick_rx.as_ref().and_then(|rx| rx.try_recv().ok()) else {
+            return;
+        };
+        self.pick_rx = None;
+        match result {
+            Ok(Some(bytes)) => {
+                let ids = self
+                    .tracks
+                    .iter()
+                    .map(|t| t.id)
+                    .filter(|id| self.selected.contains(id))
+                    .collect();
+                self.command(Command::SetCover(ids, bytes, self.state.embed_cover));
+                self.select_mode = false;
+                self.selected.clear();
+            }
+            Ok(None) => {}
+            Err(error) => self.message(format!("Could not use that cover: {error}")),
+        }
+    }
+
     fn select_bar(&mut self, ui: &mut egui::Ui, ids: Vec<i64>) {
+        self.visible = ids.clone();
+        let typing = ui.ctx().wants_keyboard_input();
+        if !typing && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A)) {
+            self.select_mode = true;
+            self.selected.extend(ids.iter().copied());
+        }
+        if !typing && self.select_mode && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.select_mode = false;
+            self.selected.clear();
+        }
         ui.horizontal(|ui| {
             if ui.selectable_label(self.select_mode, "Select").clicked() {
                 self.select_mode = !self.select_mode;
@@ -1181,12 +1292,31 @@ impl Skratch {
                 ui.label(format!("{} selected", self.selected.len()));
                 if ui
                     .add_enabled(
+                        !self.selected.is_empty() && self.pick_rx.is_none(),
+                        egui::Button::new("Set cover from image..."),
+                    )
+                    .on_hover_text("Use one image as the cover of every selected track")
+                    .clicked()
+                {
+                    self.pick_cover_file();
+                }
+                if ui
+                    .add_enabled(
                         !self.selected.is_empty(),
                         egui::Button::new("Fix tags from filenames..."),
                     )
                     .clicked()
                 {
                     self.fill_open = true;
+                }
+                if ui
+                    .add_enabled(
+                        !self.selected.is_empty() && self.fetch.is_none(),
+                        egui::Button::new("Fetch metadata..."),
+                    )
+                    .clicked()
+                {
+                    self.open_fetch();
                 }
                 if ui
                     .add_enabled(
@@ -1416,10 +1546,32 @@ impl Skratch {
         if edit_response.clicked() {
             self.action = Some(Action::Edit(id));
         }
-        if picking && response.clicked() && !self.selected.remove(&id) {
-            self.selected.insert(id);
+        // Ctrl-click toggles a track and Shift-click selects a range, with no need to switch
+        // select mode on first.
+        let modifiers = ui.input(|i| i.modifiers);
+        let modified = modifiers.command || modifiers.shift;
+        if response.clicked() && (picking || modified) {
+            self.select_mode = true;
+            let range = modifiers
+                .shift
+                .then(|| self.anchor)
+                .flatten()
+                .and_then(|anchor| {
+                    let from = self.visible.iter().position(|v| *v == anchor)?;
+                    let to = self.visible.iter().position(|v| *v == id)?;
+                    Some(self.visible[from.min(to)..=from.max(to)].to_vec())
+                });
+            match range {
+                Some(ids) => self.selected.extend(ids),
+                None => {
+                    if !self.selected.remove(&id) {
+                        self.selected.insert(id);
+                    }
+                    self.anchor = Some(id);
+                }
+            }
         }
-        let activated = if picking {
+        let activated = if picking || modified {
             false
         } else if self.state.double_click {
             response.double_clicked()
@@ -1427,19 +1579,11 @@ impl Skratch {
             response.clicked()
         };
         if activated {
-            self.action = Some(if let Some(i) = queue_index {
-                Action::Select(i)
-            } else {
-                Action::StartVisible(context_index)
-            });
+            self.action = Some(self.start_action(id, queue_index, context_index));
         }
         response.context_menu(|ui| {
             if ui.button("Play").clicked() {
-                self.action = Some(if let Some(i) = queue_index {
-                    Action::Select(i)
-                } else {
-                    Action::StartVisible(context_index)
-                });
+                self.action = Some(self.start_action(id, queue_index, context_index));
                 ui.close();
             }
             if ui.button("Add to queue").clicked() {
@@ -2008,6 +2152,8 @@ impl eframe::App for Skratch {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.poll(ctx);
         self.poll_setup();
+        self.poll_pick();
+        self.visible.clear();
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
             if matches!(self.view, View::Downloads | View::Playing) {
                 self.view = View::Tracks;
@@ -2062,6 +2208,7 @@ impl eframe::App for Skratch {
         self.edit_window(ctx);
         self.cover_window(ctx);
         self.fill_window(ctx);
+        self.fetch_window(ctx);
         self.setup_window(ctx);
         style::resize_edges(ctx);
         if let Some(action) = self.action.take() {
