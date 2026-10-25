@@ -1131,7 +1131,6 @@ impl Skratch {
                             this.track_actions(ui, &[track.id], true);
                         };
                         egui::Popup::menu(&response).show(|ui| menu(self, ui));
-                        egui::Popup::context_menu(&response).show(|ui| menu(self, ui));
                     }
                     let center = egui::pos2(rect.left() + 56.0, rect.center().y);
                     style::record(ui.painter(), center, 52.0, art, label, self.spin);
