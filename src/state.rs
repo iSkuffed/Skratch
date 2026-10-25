@@ -26,6 +26,12 @@ impl NowPanel {
     }
 }
 
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct Playlist {
+    pub name: String,
+    pub ids: Vec<i64>,
+}
+
 /// Where the queue came from, so searching the library while playing keeps to it.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub enum Source {
@@ -40,6 +46,9 @@ pub enum Source {
 #[serde(default)]
 pub struct SavedState {
     pub source: Source,
+    /// Equalizer gains in dB for the ten bands in `player::EQ_BANDS`.
+    pub eq: [f32; 10],
+    pub playlists: Vec<Playlist>,
     pub queue: Queue,
     pub position: f64,
     pub volume: f64,

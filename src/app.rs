@@ -1,7 +1,7 @@
 use crate::{
     artwork::Artwork,
     service::{self, Command, Event},
-    state::{SavedState, Source},
+    state::{Playlist, SavedState, Source},
     style::{self, Icon},
 };
 use eframe::egui::{self, Color32, CornerRadius, Frame, Margin, RichText};
@@ -12,7 +12,7 @@ use skratch::{
     media::{DesktopControls, MediaCommand},
     model::{MetadataEdit, Track},
     online::{self, Candidate},
-    player::{Player, PlayerEvent},
+    player::{EQ_BANDS, Player, PlayerEvent},
     queue::Repeat,
     tagparse::{self, Parsed},
     tools,
@@ -38,6 +38,7 @@ enum View {
     Queue,
     Playing,
     Downloads,
+    Playlist(usize),
 }
 impl View {
     fn icon(self) -> &'static str {
@@ -48,6 +49,7 @@ impl View {
             Self::Queue => "☰",
             Self::Playing => "▶",
             Self::Downloads => "⬇",
+            Self::Playlist(_) => "♫",
         }
     }
     fn title(self) -> &'static str {
@@ -58,6 +60,7 @@ impl View {
             Self::Queue => "Play queue",
             Self::Playing => "Now playing",
             Self::Downloads => "Downloads",
+            Self::Playlist(_) => "Playlist",
         }
     }
 }
@@ -155,6 +158,8 @@ enum Action {
     StartLibrary(i64),
     /// Play this track from what the queue came from (the Now playing library panel).
     StartScoped(i64),
+    /// Play the open playlist from this row.
+    StartPlaylist(usize),
     Enqueue(i64),
     Select(usize),
     Edit(i64),
@@ -164,6 +169,7 @@ enum Action {
     Stop,
     Seek(f64),
     Volume(f64),
+    Eq([f32; 10]),
 }
 
 pub struct Skratch {
@@ -394,6 +400,8 @@ impl Skratch {
     fn start_action(&self, id: i64, queue_index: Option<usize>, context_index: usize) -> Action {
         if let Some(q) = queue_index {
             Action::Select(q)
+        } else if matches!(self.view, View::Playlist(_)) {
+            Action::StartPlaylist(context_index)
         } else if self.view == View::Playing {
             Action::StartScoped(id)
         } else if self.selected_group.is_none() {
@@ -501,6 +509,7 @@ impl Skratch {
         let player = self.player.as_mut().unwrap();
         let result = player
             .set_volume(self.state.volume)
+            .and_then(|_| player.set_eq(&self.state.eq))
             .and_then(|_| player.load(&track.path));
         match result {
             Ok(()) => {
@@ -549,6 +558,15 @@ impl Skratch {
             }
             Action::StartLibrary(id) => {
                 self.start_from(id, Source::Library);
+                Ok(())
+            }
+            Action::StartPlaylist(row) => {
+                if let View::Playlist(p) = self.view {
+                    let ids = self.playlist_ids(p);
+                    self.state.source = Source::Tracks(ids.clone());
+                    self.state.queue.start(ids, row);
+                    self.start_current(0.0);
+                }
                 Ok(())
             }
             Action::StartScoped(id) => {
@@ -621,6 +639,13 @@ impl Skratch {
                     player.set_volume(self.state.volume)
                 } else {
                     Ok(())
+                }
+            }
+            Action::Eq(gains) => {
+                self.state.eq = gains;
+                match self.player.as_mut() {
+                    Some(player) => player.set_eq(&gains),
+                    None => Ok(()),
                 }
             }
             Action::Edit(id) => {
@@ -867,6 +892,32 @@ impl Skratch {
                         self.selected.clear();
                         self.rebuild();
                     }
+                }
+                section(ui, "PLAYLISTS", true);
+                let names: Vec<String> = self.state.playlists.iter().map(|p| p.name.clone()).collect();
+                for (i, name) in names.iter().enumerate() {
+                    let name = display(name, "Untitled playlist");
+                    if ui
+                        .selectable_label(
+                            self.view == View::Playlist(i),
+                            RichText::new(format!("{}  {name}", View::Playlist(i).icon())).size(16.0),
+                        )
+                        .clicked()
+                    {
+                        self.view = View::Playlist(i);
+                        self.selected_group = None;
+                        self.selected.clear();
+                        self.rebuild();
+                    }
+                }
+                if ui.small_button("+ New playlist").clicked() {
+                    self.state.playlists.push(Playlist {
+                        name: "New playlist".into(),
+                        ids: Vec::new(),
+                    });
+                    self.view = View::Playlist(self.state.playlists.len() - 1);
+                    self.selected.clear();
+                    self.rebuild();
                 }
                 section(ui, "MUSIC FOLDERS", true);
                 let mut remove = None;
@@ -1139,6 +1190,7 @@ impl Skratch {
                                     if slider.changed() || wheel != 0.0 {
                                         self.action = Some(Action::Volume(volume));
                                     }
+                                    self.eq_button(ui);
                                 },
                             );
                         });
@@ -1227,6 +1279,181 @@ impl Skratch {
     }
 
     /// "Select" toggle plus the batch actions, shown above any track list. `ids` are the visible tracks.
+    /// The "EQ" button in the player bar and the ten-band panel it opens.
+    fn eq_button(&mut self, ui: &mut egui::Ui) {
+        const PRESETS: [(&str, [f32; 10]); 5] = [
+            ("Flat", [0.0; 10]),
+            (
+                "Bass boost",
+                [6.0, 5.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ),
+            (
+                "Treble boost",
+                [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 4.0, 5.0, 6.0],
+            ),
+            (
+                "Vocal",
+                [-2.0, -2.0, -1.0, 1.0, 3.0, 3.0, 2.0, 0.0, -1.0, -2.0],
+            ),
+            ("Rock", [4.0, 3.0, 2.0, 0.0, -1.0, -1.0, 1.0, 3.0, 4.0, 4.0]),
+        ];
+        let mut eq = self.state.eq;
+        let flat = eq.iter().all(|g| g.abs() < 0.05);
+        let label = RichText::new("EQ").color(if flat { style::CREAM } else { self.accent });
+        let config = egui::containers::menu::MenuConfig::new()
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        egui::containers::menu::MenuButton::new(label)
+            .config(config)
+            .ui(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Preset");
+                    for (name, gains) in PRESETS {
+                        if ui.selectable_label(eq == gains, name).clicked() {
+                            eq = gains;
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().slider_width = 130.0;
+                    ui.spacing_mut().item_spacing.x = 14.0;
+                    for (i, hz) in EQ_BANDS.iter().enumerate() {
+                        ui.vertical_centered(|ui| {
+                            ui.add(
+                                egui::Slider::new(&mut eq[i], -12.0..=12.0)
+                                    .vertical()
+                                    .show_value(false),
+                            );
+                            let name = if *hz >= 1000 {
+                                format!("{}k", hz / 1000)
+                            } else {
+                                hz.to_string()
+                            };
+                            ui.label(RichText::new(name).small().weak());
+                            ui.label(RichText::new(format!("{:+.0}", eq[i])).small());
+                        });
+                    }
+                });
+            });
+        if eq != self.state.eq {
+            self.action = Some(Action::Eq(eq));
+        }
+    }
+
+    /// The playlist's tracks that are still in the library.
+    fn playlist_ids(&self, p: usize) -> Vec<i64> {
+        self.state.playlists.get(p).map_or_else(Vec::new, |list| {
+            list.ids
+                .iter()
+                .copied()
+                .filter(|id| self.by_id.contains_key(id))
+                .collect()
+        })
+    }
+
+    /// The selected tracks in the order they are listed.
+    fn selected_ids(&self) -> Vec<i64> {
+        if self.visible.is_empty() {
+            self.tracks
+                .iter()
+                .map(|t| t.id)
+                .filter(|id| self.selected.contains(id))
+                .collect()
+        } else {
+            self.visible
+                .iter()
+                .copied()
+                .filter(|id| self.selected.contains(id))
+                .collect()
+        }
+    }
+
+    fn add_to_playlist(&mut self, p: usize, ids: &[i64]) {
+        if let Some(list) = self.state.playlists.get_mut(p) {
+            for id in ids {
+                if !list.ids.contains(id) {
+                    list.ids.push(*id);
+                }
+            }
+        }
+    }
+
+    /// "Add to playlist" submenu contents: each playlist, or a new one.
+    fn playlist_menu(&mut self, ui: &mut egui::Ui, ids: &[i64]) {
+        for i in 0..self.state.playlists.len() {
+            let name = display(&self.state.playlists[i].name, "Untitled playlist").to_owned();
+            if ui.button(name).clicked() {
+                self.add_to_playlist(i, ids);
+                ui.close();
+            }
+        }
+        if ui.button("+ New playlist").clicked() {
+            self.state.playlists.push(Playlist {
+                name: "New playlist".into(),
+                ids: Vec::new(),
+            });
+            let last = self.state.playlists.len() - 1;
+            self.add_to_playlist(last, ids);
+            ui.close();
+        }
+    }
+
+    fn playlist_ui(&mut self, ui: &mut egui::Ui, p: usize) {
+        if p >= self.state.playlists.len() {
+            self.view = View::Tracks;
+            self.rebuild();
+            return;
+        }
+        ui.add_space(10.0);
+        ui.add(
+            egui::TextEdit::singleline(&mut self.state.playlists[p].name)
+                .font(egui::TextStyle::Heading)
+                .hint_text("Playlist name")
+                .desired_width(360.0)
+                .frame(false),
+        );
+        let ids = self.playlist_ids(p);
+        ui.horizontal(|ui| {
+            ui.label(format!("{} tracks", ids.len()));
+            if ui
+                .add_enabled(!ids.is_empty(), egui::Button::new("Play all"))
+                .clicked()
+            {
+                self.action = Some(Action::StartPlaylist(0));
+            }
+            ui.menu_button("Delete playlist", |ui| {
+                if ui.button("Yes, delete it").clicked() {
+                    self.state.playlists.remove(p);
+                    self.view = View::Tracks;
+                    self.rebuild();
+                    ui.close();
+                }
+            });
+            if !self.selected.is_empty() && ui.button("Remove selected").clicked() {
+                let gone = self.selected.clone();
+                self.state.playlists[p].ids.retain(|id| !gone.contains(id));
+                self.selected.clear();
+            }
+        });
+        self.select_bar(ui, ids.clone());
+        if ids.is_empty() {
+            ui.add_space(20.0);
+            ui.label("Empty. Right-click a track and choose Add to playlist, or select several tracks and use the Add to playlist button.");
+            return;
+        }
+        let rows: Vec<usize> = ids
+            .iter()
+            .filter_map(|id| self.by_id.get(id).copied())
+            .collect();
+        egui::ScrollArea::vertical()
+            .id_salt(("playlist", p))
+            .show_rows(ui, 40.0, rows.len(), |ui, range| {
+                for r in range {
+                    self.track_row(ui, rows[r], None, r);
+                }
+            });
+    }
+
     /// Asks for an image file; `poll_pick` applies it to the selected tracks.
     fn pick_cover_file(&mut self) {
         let (tx, rx) = mpsc::channel();
@@ -1290,6 +1517,10 @@ impl Skratch {
                     self.selected.clear();
                 }
                 ui.label(format!("{} selected", self.selected.len()));
+                if !self.selected.is_empty() {
+                    let picked = self.selected_ids();
+                    ui.menu_button("Add to playlist", |ui| self.playlist_menu(ui, &picked));
+                }
                 if ui
                     .add_enabled(
                         !self.selected.is_empty() && self.pick_rx.is_none(),
@@ -1590,6 +1821,15 @@ impl Skratch {
                 self.action = Some(Action::Enqueue(id));
                 ui.close();
             }
+            ui.menu_button("Add to playlist", |ui| self.playlist_menu(ui, &[id]));
+            if let View::Playlist(p) = self.view
+                && ui.button("Remove from playlist").clicked()
+            {
+                if let Some(list) = self.state.playlists.get_mut(p) {
+                    list.ids.retain(|v| *v != id);
+                }
+                ui.close();
+            }
             if ui.button("Edit tags / filename").clicked() {
                 self.action = Some(Action::Edit(id));
                 ui.close();
@@ -1608,6 +1848,10 @@ impl Skratch {
         }
         if self.view == View::Downloads {
             egui::CentralPanel::default().show_inside(ui, |ui| self.download_ui(ui));
+            return;
+        }
+        if let View::Playlist(p) = self.view {
+            egui::CentralPanel::default().show_inside(ui, |ui| self.playlist_ui(ui, p));
             return;
         }
         egui::CentralPanel::default().show_inside(ui, |ui| {

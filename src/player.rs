@@ -39,6 +39,9 @@ pub struct Player {
     shutdown: Arc<AtomicBool>,
 }
 
+/// Centre frequencies of the equalizer bands, in Hz.
+pub const EQ_BANDS: [u32; 10] = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+
 impl Player {
     pub fn start(wake: std::sync::Arc<dyn Fn() + Send + Sync>) -> Result<Self> {
         Self::start_with_output(wake, None)
@@ -179,6 +182,22 @@ impl Player {
         }
         self.command(vec![json!("set_property"), json!("volume"), json!(volume)])
             .context("set mpv volume")
+    }
+
+    /// Applies a ten-band equalizer (gains in dB, centred on `EQ_BANDS`); all zero removes it.
+    pub fn set_eq(&mut self, gains: &[f32; 10]) -> Result<()> {
+        let filter = if gains.iter().all(|g| g.abs() < 0.05) {
+            String::new()
+        } else {
+            let bands: Vec<String> = EQ_BANDS
+                .iter()
+                .zip(gains)
+                .map(|(hz, g)| format!("equalizer=f={hz}:t=o:w=1:g={:.1}", g.clamp(-12.0, 12.0)))
+                .collect();
+            format!("lavfi=[{}]", bands.join(","))
+        };
+        self.command(vec![json!("set_property"), json!("af"), json!(filter)])
+            .context("set mpv equalizer")
     }
 
     pub fn stop(&mut self) -> Result<()> {
