@@ -160,7 +160,6 @@ enum Action {
     StartScoped(i64),
     /// Play the open playlist from this row.
     StartPlaylist(usize),
-    Enqueue(i64),
     Select(usize),
     Edit(i64),
     Pause,
@@ -575,10 +574,6 @@ impl Skratch {
             }
             Action::FindCover(ids) => {
                 self.open_cover(ids);
-                Ok(())
-            }
-            Action::Enqueue(id) => {
-                self.state.queue.enqueue(id);
                 Ok(())
             }
             Action::Select(index) => {
@@ -1316,22 +1311,27 @@ impl Skratch {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().slider_width = 130.0;
-                    ui.spacing_mut().item_spacing.x = 14.0;
+                    ui.spacing_mut().item_spacing.x = 8.0;
                     for (i, hz) in EQ_BANDS.iter().enumerate() {
-                        ui.vertical_centered(|ui| {
-                            ui.add(
-                                egui::Slider::new(&mut eq[i], -12.0..=12.0)
-                                    .vertical()
-                                    .show_value(false),
-                            );
-                            let name = if *hz >= 1000 {
-                                format!("{}k", hz / 1000)
-                            } else {
-                                hz.to_string()
-                            };
-                            ui.label(RichText::new(name).small().weak());
-                            ui.label(RichText::new(format!("{:+.0}", eq[i])).small());
-                        });
+                        // a fixed-width column: `vertical_centered` would take the whole popup
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(34.0, 190.0),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |ui| {
+                                ui.add(
+                                    egui::Slider::new(&mut eq[i], -12.0..=12.0)
+                                        .vertical()
+                                        .show_value(false),
+                                );
+                                let name = if *hz >= 1000 {
+                                    format!("{}k", hz / 1000)
+                                } else {
+                                    hz.to_string()
+                                };
+                                ui.label(RichText::new(name).small().weak());
+                                ui.label(RichText::new(format!("{:+.0}", eq[i])).small());
+                            },
+                        );
                     }
                 });
             });
@@ -1491,6 +1491,79 @@ impl Skratch {
         }
     }
 
+    /// What can be done with tracks, shared by the Select bar (`menu` false, as buttons) and the
+    /// right-click menu (`menu` true), so both always offer the same things.
+    fn track_actions(&mut self, ui: &mut egui::Ui, ids: &[i64], menu: bool) {
+        let some = !ids.is_empty();
+        // the dialogs below work on the selection, so make it exactly these tracks
+        let select = |this: &mut Self| {
+            this.selected = ids.iter().copied().collect();
+            this.select_mode = true;
+        };
+        let mut done = false;
+        if ids.len() == 1
+            && ui
+                .add_enabled(some, egui::Button::new("Edit tags / filename"))
+                .clicked()
+        {
+            self.action = Some(Action::Edit(ids[0]));
+            done = true;
+        }
+        if ui
+            .add_enabled(some, egui::Button::new("Add to queue"))
+            .clicked()
+        {
+            for id in ids {
+                self.state.queue.enqueue(*id);
+            }
+            done = true;
+        }
+        ui.add_enabled_ui(some, |ui| {
+            ui.menu_button("Add to playlist", |ui| self.playlist_menu(ui, ids));
+        });
+        if ui
+            .add_enabled(
+                some && self.pick_rx.is_none(),
+                egui::Button::new("Set cover from image..."),
+            )
+            .on_hover_text("Use one image as the cover of every selected track")
+            .clicked()
+        {
+            select(self);
+            self.pick_cover_file();
+            done = true;
+        }
+        if ui
+            .add_enabled(some, egui::Button::new("Fix tags from filenames..."))
+            .clicked()
+        {
+            select(self);
+            self.fill_open = true;
+            done = true;
+        }
+        if ui
+            .add_enabled(
+                some && self.fetch.is_none(),
+                egui::Button::new("Fetch metadata..."),
+            )
+            .clicked()
+        {
+            select(self);
+            self.open_fetch();
+            done = true;
+        }
+        if ui
+            .add_enabled(some, egui::Button::new("Find cover online..."))
+            .clicked()
+        {
+            self.action = Some(Action::FindCover(ids.to_vec()));
+            done = true;
+        }
+        if done && menu {
+            ui.close();
+        }
+    }
+
     fn select_bar(&mut self, ui: &mut egui::Ui, ids: Vec<i64>) {
         self.visible = ids.clone();
         let typing = ui.ctx().wants_keyboard_input();
@@ -1517,53 +1590,8 @@ impl Skratch {
                     self.selected.clear();
                 }
                 ui.label(format!("{} selected", self.selected.len()));
-                if !self.selected.is_empty() {
-                    let picked = self.selected_ids();
-                    ui.menu_button("Add to playlist", |ui| self.playlist_menu(ui, &picked));
-                }
-                if ui
-                    .add_enabled(
-                        !self.selected.is_empty() && self.pick_rx.is_none(),
-                        egui::Button::new("Set cover from image..."),
-                    )
-                    .on_hover_text("Use one image as the cover of every selected track")
-                    .clicked()
-                {
-                    self.pick_cover_file();
-                }
-                if ui
-                    .add_enabled(
-                        !self.selected.is_empty(),
-                        egui::Button::new("Fix tags from filenames..."),
-                    )
-                    .clicked()
-                {
-                    self.fill_open = true;
-                }
-                if ui
-                    .add_enabled(
-                        !self.selected.is_empty() && self.fetch.is_none(),
-                        egui::Button::new("Fetch metadata..."),
-                    )
-                    .clicked()
-                {
-                    self.open_fetch();
-                }
-                if ui
-                    .add_enabled(
-                        !self.selected.is_empty(),
-                        egui::Button::new("Find cover online..."),
-                    )
-                    .clicked()
-                {
-                    let ids = self
-                        .tracks
-                        .iter()
-                        .map(|t| t.id)
-                        .filter(|id| self.selected.contains(id))
-                        .collect();
-                    self.action = Some(Action::FindCover(ids));
-                }
+                let picked = self.selected_ids();
+                self.track_actions(ui, &picked, false);
             }
         });
     }
@@ -1817,25 +1845,19 @@ impl Skratch {
                 self.action = Some(self.start_action(id, queue_index, context_index));
                 ui.close();
             }
-            if ui.button("Add to queue").clicked() {
-                self.action = Some(Action::Enqueue(id));
-                ui.close();
-            }
-            ui.menu_button("Add to playlist", |ui| self.playlist_menu(ui, &[id]));
+            // on a selected row the menu acts on the whole selection, like the Select bar
+            let targets = if self.selected.contains(&id) {
+                self.selected_ids()
+            } else {
+                vec![id]
+            };
+            self.track_actions(ui, &targets, true);
             if let View::Playlist(p) = self.view
                 && ui.button("Remove from playlist").clicked()
             {
                 if let Some(list) = self.state.playlists.get_mut(p) {
-                    list.ids.retain(|v| *v != id);
+                    list.ids.retain(|v| !targets.contains(v));
                 }
-                ui.close();
-            }
-            if ui.button("Edit tags / filename").clicked() {
-                self.action = Some(Action::Edit(id));
-                ui.close();
-            }
-            if ui.button("Find cover online...").clicked() {
-                self.action = Some(Action::FindCover(vec![id]));
                 ui.close();
             }
         });
