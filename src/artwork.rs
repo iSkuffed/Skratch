@@ -19,7 +19,12 @@ pub struct Artwork {
     order: VecDeque<PathBuf>,
     /// File modification time when each cover was requested, to spot covers that changed on disk.
     stamps: HashMap<PathBuf, Option<SystemTime>>,
+    /// Covers asked for since the last `drain`, i.e. roughly what one frame shows.
+    touched: usize,
 }
+
+/// Textures kept at least; a big window shows more than this, so it also grows with the screen.
+const KEEP: usize = 128;
 
 fn modified(path: &Path) -> Option<SystemTime> {
     path.metadata().and_then(|meta| meta.modified()).ok()
@@ -73,6 +78,7 @@ impl Artwork {
             glows: HashMap::new(),
             order: VecDeque::new(),
             stamps: HashMap::new(),
+            touched: 0,
         }
     }
 
@@ -98,6 +104,8 @@ impl Artwork {
     }
 
     pub fn drain(&mut self, ctx: &egui::Context) {
+        let shown = self.touched.max(KEEP / 2);
+        self.touched = 0;
         while let Ok((path, image)) = self.results.try_recv() {
             self.pending.remove(&path);
             let texture = image.map(|(image, accent, glow)| {
@@ -111,7 +119,9 @@ impl Artwork {
             });
             self.textures.insert(path.clone(), texture);
             self.order.push_back(path);
-            while self.order.len() > 48 {
+            // never evict what the last frame showed, or a full page of covers would reload forever
+            let limit = KEEP.max(shown * 2);
+            while self.order.len() > limit {
                 if let Some(old) = self.order.pop_front() {
                     self.textures.remove(&old);
                     self.glows.remove(&old);
@@ -123,6 +133,7 @@ impl Artwork {
 
     /// The decoded cover, or `None` while it loads or when the file is not an image.
     pub fn texture(&mut self, path: &Path) -> Option<TextureId> {
+        self.touched += 1;
         if let Some(texture) = self.textures.get(path) {
             // Most recently used goes last, so eviction never takes what is on screen.
             if self.order.back().map(PathBuf::as_path) != Some(path)

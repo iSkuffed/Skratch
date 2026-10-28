@@ -439,17 +439,15 @@ impl Skratch {
         let mut filtered = std::mem::take(&mut self.filtered);
         self.sort_indices(&mut filtered);
         self.filtered = filtered;
-        let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+        // Names that differ only in capitalisation are one group, shown as first spelled.
+        let mut groups: BTreeMap<(String, String), Group> = BTreeMap::new();
         for i in &self.filtered {
             let t = &self.tracks[*i];
-            let key = if self.view == View::Artists {
-                (
-                    display(&t.artist, "Unknown artist").to_owned(),
-                    String::new(),
-                )
+            let (name, subtitle) = if self.view == View::Artists {
+                (display(&t.artist, "Unknown artist"), "")
             } else {
                 (
-                    display(&t.album, "Unknown album").to_owned(),
+                    display(&t.album, "Unknown album"),
                     display(
                         if t.album_artist.is_empty() {
                             &t.artist
@@ -457,20 +455,20 @@ impl Skratch {
                             &t.album_artist
                         },
                         "Unknown artist",
-                    )
-                    .to_owned(),
+                    ),
                 )
             };
-            groups.entry(key).or_default().push(*i);
+            groups
+                .entry((name.to_lowercase(), subtitle.to_lowercase()))
+                .or_insert_with(|| Group {
+                    name: name.to_owned(),
+                    subtitle: subtitle.to_owned(),
+                    indices: Vec::new(),
+                })
+                .indices
+                .push(*i);
         }
-        self.groups = groups
-            .into_iter()
-            .map(|((name, subtitle), indices)| Group {
-                name,
-                subtitle,
-                indices,
-            })
-            .collect();
+        self.groups = groups.into_values().collect();
         // Group order follows the selected track sort, including year and descending order.
         let ranks: HashMap<usize, usize> = self
             .filtered
@@ -487,7 +485,8 @@ impl Skratch {
         });
         self.selected_group = selected.and_then(|key| {
             self.groups.iter().position(|g| {
-                (g.name.as_str(), g.subtitle.as_str()) == (key.0.as_str(), key.1.as_str())
+                (g.name.to_lowercase(), g.subtitle.to_lowercase())
+                    == (key.0.to_lowercase(), key.1.to_lowercase())
             })
         });
     }
