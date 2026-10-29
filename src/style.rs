@@ -140,6 +140,20 @@ pub fn sleeve(painter: &Painter, rect: Rect, seed: &str) {
 
 /// A vinyl record. `angle` spins the label and its art; the sheen stays put like a real reflection.
 pub fn record(p: &Painter, c: Pos2, r: f32, art: Option<TextureId>, label: Color32, angle: f32) {
+    record_fading(p, c, r, art, None, label, angle);
+}
+
+/// Like `record`, with the previous label still showing at `fading.1` opacity (0 to 1) on top,
+/// for a crossfade when the track changes.
+pub fn record_fading(
+    p: &Painter,
+    c: Pos2,
+    r: f32,
+    art: Option<TextureId>,
+    fading: Option<(TextureId, f32)>,
+    label: Color32,
+    angle: f32,
+) {
     p.circle_filled(c, r, Color32::from_rgb(9, 8, 7));
     p.circle_stroke(c, r, stroke(1.0, Color32::from_white_alpha(38)));
     for k in 0..14 {
@@ -148,31 +162,35 @@ pub fn record(p: &Painter, c: Pos2, r: f32, art: Option<TextureId>, label: Color
         p.circle_stroke(c, ring, stroke(0.7, Color32::from_white_alpha(alpha)));
     }
     let lr = r * 0.36;
-    match art {
-        Some(id) => {
-            const N: usize = 64;
-            let mut mesh = Mesh::with_texture(id);
-            let vertex = |pos, uv| egui::epaint::Vertex {
-                pos,
-                uv,
-                color: Color32::WHITE,
-            };
-            mesh.vertices.push(vertex(c, Pos2::new(0.5, 0.5)));
-            for i in 0..=N {
-                let t = i as f32 / N as f32 * TAU;
-                let uv = Pos2::new(0.5 + 0.5 * t.cos(), 0.5 + 0.5 * t.sin());
-                mesh.vertices
-                    .push(vertex(c + lr * Vec2::angled(t + angle), uv));
-            }
-            for i in 0..N as u32 {
-                mesh.add_triangle(0, 1 + i, 2 + i);
-            }
-            p.add(Shape::mesh(mesh));
+    let label_art = |id: TextureId, alpha: f32| {
+        const N: usize = 64;
+        let mut mesh = Mesh::with_texture(id);
+        let vertex = |pos, uv| egui::epaint::Vertex {
+            pos,
+            uv,
+            color: Color32::WHITE.gamma_multiply(alpha),
+        };
+        mesh.vertices.push(vertex(c, Pos2::new(0.5, 0.5)));
+        for i in 0..=N {
+            let t = i as f32 / N as f32 * TAU;
+            let uv = Pos2::new(0.5 + 0.5 * t.cos(), 0.5 + 0.5 * t.sin());
+            mesh.vertices
+                .push(vertex(c + lr * Vec2::angled(t + angle), uv));
         }
+        for i in 0..N as u32 {
+            mesh.add_triangle(0, 1 + i, 2 + i);
+        }
+        p.add(Shape::mesh(mesh));
+    };
+    match art {
+        Some(id) => label_art(id, 1.0),
         None => {
             p.circle_filled(c, lr, label);
             p.circle_filled(c + lr * 0.68 * Vec2::angled(angle), lr * 0.09, BG);
         }
+    }
+    if let Some((id, alpha)) = fading {
+        label_art(id, alpha);
     }
     p.circle_stroke(c, lr, stroke(1.0, Color32::from_black_alpha(160)));
     p.circle_filled(c, r * 0.045, BG);
@@ -188,9 +206,11 @@ pub fn record(p: &Painter, c: Pos2, r: f32, art: Option<TextureId>, label: Color
 }
 
 /// Tonearm resting off the record at `lowered == 0.0` and sitting in the grooves at `1.0`.
-/// `scale` is 1.0 for the player bar's 52 px record.
-pub fn tonearm(p: &Painter, pivot: Pos2, lowered: f32, accent: Color32, scale: f32) {
-    let angle = (95.0 + 30.0 * lowered).to_radians();
+/// `lowered` may overshoot a little while the arm settles. `progress` (0 to 1) is how far into the
+/// song it is: the needle follows the groove inward as it plays. `scale` is 1.0 for the player
+/// bar's 52 px record.
+pub fn tonearm(p: &Painter, pivot: Pos2, lowered: f32, progress: f32, accent: Color32, scale: f32) {
+    let angle = (95.0 + 30.0 * lowered + 8.0 * progress * lowered.clamp(0.0, 1.0)).to_radians();
     let head = pivot + 100.0 * scale * Vec2::angled(angle);
     p.line_segment(
         [pivot, head],
@@ -207,6 +227,8 @@ pub enum Icon {
     Next,
     Play,
     Pause,
+    /// Play (0.0) turning into pause (1.0).
+    Morph(f32),
 }
 
 pub fn icon_button(
@@ -258,6 +280,27 @@ pub fn icon_button(
         Icon::Pause => {
             p.add(bar(-u * 0.5, u * 0.55));
             p.add(bar(u * 0.5, u * 0.55))
+        }
+        Icon::Morph(t) => {
+            // the triangle cut in two, each half sliding into one of the pause bars
+            let corners = |play: [(f32, f32); 4], pause: [(f32, f32); 4]| {
+                let at = |i: usize| {
+                    let (a, b) = (play[i], pause[i]);
+                    Pos2::new(
+                        c.x + u * (a.0 + (b.0 - a.0) * t),
+                        c.y + u * (a.1 + (b.1 - a.1) * t),
+                    )
+                };
+                Shape::convex_polygon(vec![at(0), at(1), at(2), at(3)], fg, Stroke::NONE)
+            };
+            p.add(corners(
+                [(-0.7, -1.0), (0.25, -0.47), (0.25, 0.47), (-0.7, 1.0)],
+                [(-0.775, -1.0), (-0.225, -1.0), (-0.225, 1.0), (-0.775, 1.0)],
+            ));
+            p.add(corners(
+                [(0.2, -0.5), (1.1, 0.0), (1.1, 0.0), (0.2, 0.5)],
+                [(0.225, -1.0), (0.775, -1.0), (0.775, 1.0), (0.225, 1.0)],
+            ))
         }
         Icon::Prev => {
             p.add(bar(-u * 0.9, u * 0.4));
@@ -334,22 +377,43 @@ pub fn toggle_button(ui: &mut Ui, toggle: Toggle, size: f32, active: Option<Colo
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
+/// What the seek bar did this frame.
+pub struct Seek {
+    /// The new position while the user clicks or drags.
+    pub to: Option<f64>,
+    pub dragging: bool,
+    /// Horizontal drag since the last frame, in points.
+    pub drag_dx: f32,
+}
+
 /// A seek bar drawn as record grooves. Bar heights are the track's loudness (`peaks`, evenly
-/// spaced over the whole track); until it is known the bars sit flat.
-/// Returns the new position while the user clicks or drags.
+/// spaced over the whole track); until it is known the bars sit flat. With `beat` (the bass level,
+/// 0 to 1) the playhead glows, the bars around it follow the bass, and hovering shows a scrub line
+/// with the time under the pointer.
 pub fn groove_seek(
     ui: &mut Ui,
     position: f64,
     duration: f64,
     peaks: &[f32],
     accent: Color32,
-) -> Option<f64> {
+    beat: Option<f32>,
+) -> Seek {
     let (rect, response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width().max(60.0), 30.0),
         Sense::click_and_drag(),
     );
     let fraction = (position / duration.max(1.0)).clamp(0.0, 1.0) as f32;
     let n = (rect.width() / 4.0) as usize;
+    let hover = response
+        .hover_pos()
+        .or_else(|| {
+            response
+                .dragged()
+                .then(|| response.interact_pointer_pos())
+                .flatten()
+        })
+        .map(|pos| ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0));
+    let head = fraction * n as f32;
     let p = ui.painter();
     for k in 0..n {
         let x = rect.left() + (k as f32 + 0.5) * rect.width() / n as f32;
@@ -361,9 +425,17 @@ pub fn groove_seek(
             .iter()
             .copied()
             .fold(0.0, f32::max);
-        let half = (rect.height() * 0.5 * wave).max(2.0);
-        let color = if (k as f32 + 0.5) / (n as f32) <= fraction {
+        let mut half = (rect.height() * 0.5 * wave).max(2.0);
+        if let Some(beat) = beat {
+            // the grooves under the needle swell with the bass
+            let near = (1.0 - (k as f32 + 0.5 - head).abs() / 7.0).max(0.0);
+            half = (half * (1.0 + 0.7 * beat * near * near)).min(rect.height() * 0.5);
+        }
+        let at = (k as f32 + 0.5) / (n as f32);
+        let color = if at <= fraction {
             accent
+        } else if beat.is_some() && hover.is_some_and(|h| at <= h) {
+            Color32::from_white_alpha(96)
         } else if response.hovered() {
             Color32::from_white_alpha(70)
         } else {
@@ -377,9 +449,53 @@ pub fn groove_seek(
             stroke(2.0, color),
         );
     }
-    let pos = response.interact_pointer_pos()?;
-    (response.dragged() || response.clicked())
-        .then(|| ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * duration)
+    if beat.is_some() && duration > 0.0 {
+        let x = rect.left() + fraction * rect.width();
+        for (width, alpha) in [(16.0, 0.05), (9.0, 0.09), (4.0, 0.2)] {
+            p.rect_filled(
+                Rect::from_center_size(
+                    Pos2::new(x, rect.center().y),
+                    Vec2::new(width, rect.height()),
+                ),
+                width / 2.0,
+                accent.gamma_multiply(alpha),
+            );
+        }
+        p.line_segment(
+            [
+                Pos2::new(x, rect.top() + 2.0),
+                Pos2::new(x, rect.bottom() - 2.0),
+            ],
+            stroke(2.0, Color32::WHITE),
+        );
+        if let Some(h) = hover.filter(|_| duration > 0.0) {
+            let hx = rect.left() + h * rect.width();
+            p.line_segment(
+                [Pos2::new(hx, rect.top()), Pos2::new(hx, rect.bottom())],
+                stroke(1.0, Color32::from_white_alpha(120)),
+            );
+            let text = crate::app::time(f64::from(h) * duration);
+            let label = p.layout_no_wrap(text, FontId::proportional(12.0), CREAM);
+            let size = label.size() + Vec2::new(12.0, 6.0);
+            let lx = hx.clamp(rect.left() + size.x / 2.0, rect.right() - size.x / 2.0);
+            let tag = Rect::from_center_size(Pos2::new(lx, rect.top() - size.y / 2.0 - 2.0), size);
+            p.rect_filled(tag, 5.0, RAISED);
+            p.galley(tag.center() - label.size() / 2.0, label, CREAM);
+        }
+    }
+    let to = response.interact_pointer_pos().and_then(|pos| {
+        (response.dragged() || response.clicked())
+            .then(|| ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * duration)
+    });
+    Seek {
+        to,
+        dragging: response.dragged(),
+        drag_dx: if response.dragged() {
+            response.drag_delta().x
+        } else {
+            0.0
+        },
+    }
 }
 
 fn wordmark(p: &Painter, left_center: Pos2, accent: Color32) {

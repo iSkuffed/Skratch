@@ -1,7 +1,6 @@
 //! Draws one lyric line: effects, dimmed ad-libs and rhyme colours, wrapped to the panel.
 use eframe::egui::{
-    self, Color32, FontId, Pos2, Response, Sense, TextFormat, Vec2, ecolor::Hsva,
-    text::LayoutJob,
+    self, Color32, FontId, Pos2, Response, Sense, TextFormat, Vec2, ecolor::Hsva, text::LayoutJob,
 };
 use skratch::{
     lyricfx::{self, ITALIC, LOUD, MOVING, RAINBOW, SHAKE, WAVE},
@@ -260,11 +259,10 @@ pub fn draw_line(
     }
     let height = (y + row_h).max(base * 1.3);
     ui.data_mut(|d| d.insert_temp(key, height));
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
     let time = look.time as f32;
     let mut painter = ui.painter().clone();
-    painter.set_opacity(fade);
+    painter.multiply_opacity(fade);
     for piece in &pieces {
         let mut at: Pos2 = rect.min + piece.at;
         if animate {

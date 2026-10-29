@@ -227,6 +227,20 @@ pub struct Skratch {
     spin: f32,
     spin_speed: f32,
     arm: f32,
+    arm_velocity: f32,
+    /// The seek bar is being dragged: the arm lifts and the record follows the pointer.
+    scrubbing: bool,
+    /// The smoothed bass level of what is playing, 0 to 1.
+    beat: f32,
+    /// The view and group last drawn, and when it appeared, for the page fade-in.
+    shown: (View, Option<usize>),
+    shown_at: f64,
+    /// `page_fade` for this frame.
+    fade: f32,
+    /// The cover being shown, the one before it, and when it changed, for the crossfade.
+    shown_art: Option<PathBuf>,
+    prev_art: Option<PathBuf>,
+    art_changed_at: f64,
     reactive: Reactive,
     lyrics: lyrics::Lookup,
     /// The track the Now playing list was last scrolled to, so it follows track changes.
@@ -331,6 +345,15 @@ impl Skratch {
             spin: 0.0,
             spin_speed: 0.0,
             arm: 0.0,
+            arm_velocity: 0.0,
+            scrubbing: false,
+            beat: 0.0,
+            shown: (View::Tracks, None),
+            shown_at: -10.0,
+            fade: 1.0,
+            shown_art: None,
+            prev_art: None,
+            art_changed_at: -10.0,
             reactive: Reactive::default(),
             lyrics: lyrics::Lookup::default(),
             listed: None,
@@ -998,6 +1021,21 @@ impl Skratch {
                     .on_hover_text("Off: a single click starts a track.");
                 ui.checkbox(&mut self.state.lyrics_online, "Look up lyrics online")
                     .on_hover_text("Missing lyrics are fetched from lrclib.net, which is sent the artist, title, album and length.");
+                ui.collapsing("Effects", |ui| {
+                    let effects = &mut self.state.effects;
+                    ui.checkbox(&mut effects.animations, "Animations")
+                        .on_hover_text("Master switch for everything below.");
+                    ui.add_enabled_ui(effects.animations, |ui| {
+                        ui.checkbox(&mut effects.needle, "Moving tonearm")
+                            .on_hover_text("It drops with a bounce, creeps inward as the song plays and lifts while you seek.");
+                        ui.checkbox(&mut effects.scratch, "Scratch the record")
+                            .on_hover_text("Dragging the seek bar turns the record.");
+                        ui.checkbox(&mut effects.seek_life, "Lively seek bar")
+                            .on_hover_text("Playhead glow, bars that follow the bass, and the time under the pointer.");
+                        ui.checkbox(&mut effects.transitions, "Transitions")
+                            .on_hover_text("Pages fade in, cards rise in, covers crossfade and play/pause morphs.");
+                    });
+                });
                 if ui.button("Run setup again").clicked() {
                     self.open_setup(false);
                 }
@@ -1010,11 +1048,53 @@ impl Skratch {
         let ease = |value: &mut f32, target: f32, rate: f32| {
             *value += (target - *value) * (1.0 - (-rate * dt).exp());
         };
+        let effects = self.state.effects.clone();
         let playing = if self.playing { 1.0 } else { 0.0 };
+        let scrubbing = self.scrubbing && effects.scratch();
         ease(&mut self.spin_speed, playing, 2.5);
-        ease(&mut self.arm, playing, 3.0);
-        // 33 1/3 rpm
-        self.spin = (self.spin + self.spin_speed * 3.49 * dt) % std::f32::consts::TAU;
+        // 33 1/3 rpm, but not while the record is in the user's hand
+        if !scrubbing {
+            self.spin = (self.spin + self.spin_speed * 3.49 * dt) % std::f32::consts::TAU;
+        }
+        let lowered = if self.playing && !(self.scrubbing && effects.needle()) {
+            1.0
+        } else {
+            0.0
+        };
+        if effects.needle() {
+            // a spring: dropping onto the record overshoots a little and settles, lifting does not
+            let (stiffness, damping) = if lowered > 0.5 {
+                (140.0, 14.0)
+            } else {
+                (90.0, 19.0)
+            };
+            self.arm_velocity +=
+                ((lowered - self.arm) * stiffness - self.arm_velocity * damping) * dt;
+            self.arm += self.arm_velocity * dt;
+        } else {
+            self.arm_velocity = 0.0;
+            ease(&mut self.arm, playing, 3.0);
+        }
+        self.scrubbing = false;
+        let now = ctx.input(|i| i.time);
+        let art_path = self.current().and_then(|t| t.artwork.clone());
+        if art_path != self.shown_art {
+            self.prev_art = self.shown_art.take();
+            self.shown_art = art_path;
+            self.art_changed_at = now;
+        }
+        if now - self.art_changed_at > 0.5 {
+            self.prev_art = None;
+        } else {
+            ctx.request_repaint();
+        }
+        if let Some(path) = self.current().map(|t| t.path.clone()) {
+            self.beat = self
+                .reactive
+                .level(ctx, &path, self.state.position, self.playing);
+        } else {
+            self.beat = 0.0;
+        }
         let target = match self.current() {
             Some(t) => match t.artwork.as_deref() {
                 // Hold the current colour while the cover loads instead of detouring via the seed hue.
@@ -1041,7 +1121,10 @@ impl Skratch {
             self.accent_applied = self.accent;
             ctx.request_repaint();
         }
-        if self.spin_speed > 0.005 || (self.arm - playing).abs() > 0.005 {
+        if self.spin_speed > 0.005
+            || (self.arm - lowered).abs() > 0.002
+            || self.arm_velocity.abs() > 0.002
+        {
             ctx.request_repaint();
         }
     }
@@ -1063,6 +1146,23 @@ impl Skratch {
             .show_inside(ui, |ui| style::title_bar(ui, &self.logo, self.accent, &now));
     }
 
+    /// How far the new cover has faded in (0 to 1), and the previous cover's texture and backdrop
+    /// while it is still fading out.
+    fn crossfade(
+        &mut self,
+        ctx: &egui::Context,
+    ) -> (f32, Option<egui::TextureId>, Option<egui::TextureId>) {
+        if !self.state.effects.transitions() || self.prev_art.is_none() {
+            return (1.0, None, None);
+        }
+        let t = ((ctx.input(|i| i.time) - self.art_changed_at) / 0.4).clamp(0.0, 1.0) as f32;
+        let eased = t * t * (3.0 - 2.0 * t);
+        let old = self.prev_art.clone();
+        let texture = old.as_deref().and_then(|path| self.art.texture(path));
+        let glow = old.as_deref().and_then(|path| self.art.glow(path));
+        (eased, texture, glow)
+    }
+
     fn player_bar(&mut self, ui: &mut egui::Ui, radius: u8) {
         let track = self.current().cloned();
         if let Some(track) = &track {
@@ -1080,6 +1180,8 @@ impl Skratch {
         let label = track.as_ref().map_or(accent, |t| {
             style::seed_color(&format!("{}{}", t.artist, t.album))
         });
+        let (art_mix, old_art, old_glow) = self.crossfade(ui.ctx());
+        let progress = (self.state.position / self.duration.max(1.0)).clamp(0.0, 1.0) as f32;
         let frame = Frame::new()
             .fill(style::BAR)
             .inner_margin(Margin::symmetric(18, 10))
@@ -1102,10 +1204,18 @@ impl Skratch {
                     se: radius,
                 };
                 match glow {
-                    Some(glow) => egui::Image::new((glow, bar.size()))
-                        .tint(Color32::from_white_alpha(70))
-                        .corner_radius(round)
-                        .paint_at(ui, bar),
+                    Some(glow) => {
+                        egui::Image::new((glow, bar.size()))
+                            .tint(Color32::from_white_alpha((70.0 * art_mix) as u8))
+                            .corner_radius(round)
+                            .paint_at(ui, bar);
+                        if let Some(old) = old_glow {
+                            egui::Image::new((old, bar.size()))
+                                .tint(Color32::from_white_alpha((70.0 * (1.0 - art_mix)) as u8))
+                                .corner_radius(round)
+                                .paint_at(ui, bar);
+                        }
+                    }
                     // no cover: wash the bar with the track's own colour instead
                     None if track.is_some() => {
                         ui.painter()
@@ -1130,11 +1240,20 @@ impl Skratch {
                             .show(|ui| self.track_actions(ui, &[track.id], true));
                     }
                     let center = egui::pos2(rect.left() + 56.0, rect.center().y);
-                    style::record(ui.painter(), center, 52.0, art, label, self.spin);
+                    style::record_fading(
+                        ui.painter(),
+                        center,
+                        52.0,
+                        art,
+                        old_art.map(|id| (id, 1.0 - art_mix)),
+                        label,
+                        self.spin,
+                    );
                     style::tonearm(
                         ui.painter(),
                         egui::pos2(rect.left() + 148.0, rect.top() + 2.0),
                         self.arm,
+                        progress,
                         accent,
                         1.0,
                     );
@@ -1218,7 +1337,13 @@ impl Skratch {
                                 if style::icon_button(ui, Icon::Prev, 34.0, None, true).clicked() {
                                     self.action = Some(Action::Previous);
                                 }
-                                let icon = if self.playing {
+                                let icon = if self.state.effects.transitions() {
+                                    Icon::Morph(ui.ctx().animate_bool_with_time(
+                                        egui::Id::new("play-morph"),
+                                        self.playing,
+                                        0.18,
+                                    ))
+                                } else if self.playing {
                                     Icon::Pause
                                 } else {
                                     Icon::Play
@@ -1258,14 +1383,24 @@ impl Skratch {
                                 // reserve room for the duration label after the grooves
                                 let width = (ui.available_width() - 56.0).max(60.0);
                                 ui.allocate_ui(egui::vec2(width, 30.0), |ui| {
-                                    if let Some(position) = style::groove_seek(
+                                    let life = self.state.effects.seek_life().then_some(self.beat);
+                                    let seek = style::groove_seek(
                                         ui,
                                         self.state.position,
                                         self.duration,
                                         self.reactive.peaks(),
                                         accent,
-                                    ) {
+                                        life,
+                                    );
+                                    if let Some(position) = seek.to {
                                         self.action = Some(Action::Seek(position));
+                                    }
+                                    if seek.dragging {
+                                        self.scrubbing = true;
+                                        if self.state.effects.scratch() {
+                                            // about one turn for every 90 points of drag
+                                            self.spin += seek.drag_dx * 0.07;
+                                        }
                                     }
                                 });
                                 ui.label(time(self.duration));
@@ -1816,7 +1951,7 @@ impl Skratch {
             self.select_mode = true;
             let range = modifiers
                 .shift
-                .then(|| self.anchor)
+                .then_some(self.anchor)
                 .flatten()
                 .and_then(|anchor| {
                     let from = self.visible.iter().position(|v| *v == anchor)?;
@@ -1866,20 +2001,52 @@ impl Skratch {
         });
     }
 
+    /// How far the page just switched to has faded in (0 to 1). Opacity is applied when painting,
+    /// so nothing is laid out again while it runs.
+    fn page_fade(&mut self, ctx: &egui::Context) -> f32 {
+        let key = (self.view, self.selected_group);
+        let now = ctx.input(|i| i.time);
+        if key != self.shown {
+            self.shown = key;
+            self.shown_at = now;
+        }
+        if !self.state.effects.transitions() {
+            return 1.0;
+        }
+        if now - self.shown_at < 0.7 {
+            ctx.request_repaint();
+        }
+        let t = ((now - self.shown_at) / 0.16).clamp(0.0, 1.0) as f32;
+        1.0 - (1.0 - t).powi(3)
+    }
+
     fn library_ui(&mut self, ui: &mut egui::Ui) {
+        let fade = self.page_fade(ui.ctx());
+        self.fade = fade;
+        let enter = |ui: &mut egui::Ui| {
+            ui.set_opacity(fade);
+            ui.add_space(6.0 * (1.0 - fade));
+        };
         if self.view == View::Playing {
             self.playing_ui(ui);
             return;
         }
         if self.view == View::Downloads {
-            egui::CentralPanel::default().show_inside(ui, |ui| self.download_ui(ui));
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                enter(ui);
+                self.download_ui(ui)
+            });
             return;
         }
         if let View::Playlist(p) = self.view {
-            egui::CentralPanel::default().show_inside(ui, |ui| self.playlist_ui(ui, p));
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                enter(ui);
+                self.playlist_ui(ui, p)
+            });
             return;
         }
         egui::CentralPanel::default().show_inside(ui, |ui| {
+            enter(ui);
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 ui.heading(self.view.title());
@@ -1943,6 +2110,8 @@ impl Skratch {
                         if ui.button(label).clicked() { self.action = Some(Action::FindCover(missing)); }
                     }
                     let columns = ((ui.available_width() / 180.0) as usize).max(1);
+                    let since = ui.input(|i| i.time) - self.shown_at;
+                    let stagger = self.state.effects.transitions();
                     let rows = self.groups.len().div_ceil(columns);
                     egui::ScrollArea::vertical().id_salt("group-grid").show_rows(ui, 230.0, rows, |ui, range| {
                         for row in range {
@@ -1953,6 +2122,12 @@ impl Skratch {
                                     ui.allocate_ui_with_layout(egui::vec2(170.0, 222.0), egui::Layout::top_down(egui::Align::LEFT), |ui| {
                                         const SIZE: f32 = 145.0;
                                         ui.set_min_size(egui::vec2(170.0, 222.0));
+                                        // the first cards rise in one after another
+                                        if stagger && index < 12 {
+                                            let a = ((since - 0.03 * index as f64) / 0.22).clamp(0.0, 1.0) as f32;
+                                            ui.multiply_opacity(a);
+                                            ui.add_space(8.0 * (1.0 - a * a * (3.0 - 2.0 * a)));
+                                        }
                                         let seed = format!("{}{}", group.name, group.subtitle);
                                         let origin = ui.cursor().min;
                                         let sleeve = egui::Rect::from_min_size(origin, egui::vec2(SIZE, SIZE));
@@ -2573,7 +2748,7 @@ fn section(ui: &mut egui::Ui, title: &str, divider: bool) {
 fn display<'a>(text: &'a str, fallback: &'a str) -> &'a str {
     if text.is_empty() { fallback } else { text }
 }
-fn time(seconds: f64) -> String {
+pub(crate) fn time(seconds: f64) -> String {
     let seconds = seconds.max(0.0) as u64;
     if seconds >= 3600 {
         format!(

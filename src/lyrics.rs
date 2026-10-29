@@ -53,8 +53,14 @@ impl Lyrics {
 pub fn stamp_line(text: &str, cursor: usize, seconds: f64) -> (String, usize) {
     let chars: Vec<char> = text.chars().collect();
     let cursor = cursor.min(chars.len());
-    let start = chars[..cursor].iter().rposition(|c| *c == '\n').map_or(0, |i| i + 1);
-    let end = chars[cursor..].iter().position(|c| *c == '\n').map_or(chars.len(), |i| cursor + i);
+    let start = chars[..cursor]
+        .iter()
+        .rposition(|c| *c == '\n')
+        .map_or(0, |i| i + 1);
+    let end = chars[cursor..]
+        .iter()
+        .position(|c| *c == '\n')
+        .map_or(chars.len(), |i| cursor + i);
     let line: String = chars[start..end].iter().collect();
     let mut rest = line.trim_start();
     while let Some(tail) = rest.strip_prefix('[') {
@@ -63,11 +69,19 @@ pub fn stamp_line(text: &str, cursor: usize, seconds: f64) -> (String, usize) {
             _ => break,
         }
     }
-    let stamped = format!("[{:02}:{:05.2}]{rest}", (seconds / 60.0) as u32, seconds % 60.0);
+    let stamped = format!(
+        "[{:02}:{:05.2}]{rest}",
+        (seconds / 60.0) as u32,
+        seconds % 60.0
+    );
     let before: String = chars[..start].iter().collect();
     let after: String = chars[end..].iter().collect();
     let next = before.chars().count() + stamped.chars().count() + 1;
-    let after = if after.is_empty() { "\n".to_string() } else { after };
+    let after = if after.is_empty() {
+        "\n".to_string()
+    } else {
+        after
+    };
     (format!("{before}{stamped}{after}"), next)
 }
 
@@ -382,14 +396,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let song = dir.path().join("song.mp3");
         fs::write(dir.path().join("song.lrc"), "[00:05.00]wrong").unwrap();
-        let track = Track { path: song, ..Track::default() };
+        let track = Track {
+            path: song,
+            ..Track::default()
+        };
         let cache = dir.path().join("cache");
         save(&cache, &track, "right words").unwrap();
-        assert_eq!(find(&track, &cache, false).unwrap(), Some(Lyrics::Plain("right words".into())));
+        assert_eq!(
+            find(&track, &cache, false).unwrap(),
+            Some(Lyrics::Plain("right words".into()))
+        );
         save(&cache, &track, "").unwrap();
         assert_eq!(find(&track, &cache, false).unwrap(), None);
         restore(&cache, &track);
-        assert_eq!(find(&track, &cache, false).unwrap(), Some(Lyrics::Synced(vec![(5.0, "wrong".into())])));
+        assert_eq!(
+            find(&track, &cache, false).unwrap(),
+            Some(Lyrics::Synced(vec![(5.0, "wrong".into())]))
+        );
     }
 
     #[test]

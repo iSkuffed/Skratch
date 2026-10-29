@@ -5,8 +5,8 @@ use crate::{
     state::{NowPanel, RhymeShow, Source},
     style,
 };
-use eframe::egui::{self, Align, RichText, Sense, pos2, vec2};
 use eframe::egui::text::{CCursor, CCursorRange};
+use eframe::egui::{self, Align, RichText, Sense, pos2, vec2};
 use skratch::{
     lyricfx,
     lyrics::{self, Lyrics, Status},
@@ -16,6 +16,7 @@ use skratch::{
 impl Skratch {
     pub(super) fn playing_ui(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show_inside(ui, |ui| {
+            ui.set_opacity(self.fade);
             let Some(track) = self.current().cloned() else {
                 ui.add_space(24.0);
                 ui.heading("Nothing playing");
@@ -28,6 +29,8 @@ impl Skratch {
                 .as_deref()
                 .and_then(|path| self.art.texture(path));
             let label = style::seed_color(&format!("{}{}", track.artist, track.album));
+            let (art_mix, old_art, _) = self.crossfade(ui.ctx());
+            let progress = (self.state.position / self.duration.max(1.0)).clamp(0.0, 1.0) as f32;
             let area = ui.available_rect_before_wrap();
             let r = (area.height() * 0.38)
                 .min(area.width() * 0.19)
@@ -36,21 +39,24 @@ impl Skratch {
             let centre = pos2(area.left() + r * 1.2 + 30.0, area.center().y);
 
             // the cover as a poster on the right, fading out towards the record
-            if let Some(art) = art {
-                let side = area.height() * 1.1;
-                let poster = egui::Rect::from_min_size(
-                    pos2(area.right() - side * 0.9, area.top() - side * 0.05),
-                    vec2(side, side),
-                );
-                let mut mesh = egui::Mesh::with_texture(art);
+            let side = area.height() * 1.1;
+            let poster = egui::Rect::from_min_size(
+                pos2(area.right() - side * 0.9, area.top() - side * 0.05),
+                vec2(side, side),
+            );
+            for (texture, opacity) in [(art, art_mix), (old_art, 1.0 - art_mix)] {
+                let Some(texture) = texture.filter(|_| opacity > 0.0) else {
+                    continue;
+                };
+                let mut mesh = egui::Mesh::with_texture(texture);
                 // three columns: transparent on the left, full tint from 60% across
-                for (u, alpha) in [(0.0, 0), (0.6, 32), (1.0, 32)] {
+                for (u, alpha) in [(0.0, 0.0), (0.6, 32.0), (1.0, 32.0)] {
                     let x = egui::lerp(poster.x_range(), u);
                     for v in [0.0, 1.0] {
                         mesh.vertices.push(egui::epaint::Vertex {
                             pos: pos2(x, egui::lerp(poster.y_range(), v)),
                             uv: pos2(u, v),
-                            color: egui::Color32::from_white_alpha(alpha),
+                            color: egui::Color32::from_white_alpha((alpha * opacity) as u8),
                         });
                     }
                 }
@@ -64,9 +70,7 @@ impl Skratch {
             }
 
             // a faint halo in the track's colour that swells with the bass
-            let beat =
-                self.reactive
-                    .level(ui.ctx(), &track.path, self.state.position, self.playing);
+            let beat = self.beat;
             for (grow, alpha, reach) in [(1.4, 0.04, 0.22), (1.25, 0.05, 0.13), (1.1, 0.07, 0.06)] {
                 ui.painter().circle_filled(
                     centre,
@@ -82,11 +86,20 @@ impl Skratch {
             if response.clicked() {
                 self.action = Some(Action::Pause);
             }
-            style::record(ui.painter(), centre, r, art, label, self.spin);
+            style::record_fading(
+                ui.painter(),
+                centre,
+                r,
+                art,
+                old_art.map(|id| (id, 1.0 - art_mix)),
+                label,
+                self.spin,
+            );
             style::tonearm(
                 ui.painter(),
                 centre + vec2(92.0, -54.0) * scale,
                 self.arm,
+                progress,
                 self.accent,
                 scale,
             );
@@ -221,7 +234,10 @@ impl Skratch {
         ui.checkbox(&mut style.fade, "Fade lines away from the current one");
         ui.checkbox(&mut style.ad_libs, "Smaller, dimmer (ad-libs)");
         ui.checkbox(&mut style.effects, "Show text effects ({wave|...})");
-        ui.checkbox(&mut style.effects_live_only, "Effects only on the line being sung");
+        ui.checkbox(
+            &mut style.effects_live_only,
+            "Effects only on the line being sung",
+        );
         ui.checkbox(&mut style.animate, "Animate effects");
         ui.horizontal(|ui| {
             ui.label("Rhymes");
@@ -317,14 +333,16 @@ impl Skratch {
             }
         });
         let room = (ui.available_height() - 96.0).max(80.0);
-        egui::ScrollArea::vertical().max_height(room).show(ui, |ui| {
-            ui.add(
-                egui::TextEdit::multiline(&mut text)
-                    .id(id)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(14),
-            );
-        });
+        egui::ScrollArea::vertical()
+            .max_height(room)
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut text)
+                        .id(id)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(14),
+                );
+            });
         let (mut save, mut cancel, mut stamp) = (false, false, stamp_key);
         ui.horizontal(|ui| {
             save = ui.button("Save").clicked();
@@ -353,10 +371,16 @@ impl Skratch {
         }
         if let Some(effect) = effect {
             let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
-            let (a, b) = state.cursor.char_range().map_or((0, 0), |r| (r.primary.index, r.secondary.index));
+            let (a, b) = state
+                .cursor
+                .char_range()
+                .map_or((0, 0), |r| (r.primary.index, r.secondary.index));
             text = lyricfx::apply(&text, a, b, effect);
             let end = text.chars().count();
-            state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(a.min(end)), CCursor::new(b.min(end)))));
+            state.cursor.set_char_range(Some(CCursorRange::two(
+                CCursor::new(a.min(end)),
+                CCursor::new(b.min(end)),
+            )));
             state.store(ui.ctx(), id);
             ui.memory_mut(|m| m.request_focus(id));
         }
@@ -422,14 +446,22 @@ impl Skratch {
                     .show(ui, |ui| {
                         for (i, line) in text.lines().enumerate() {
                             let found = marks.get(i).map_or(&[][..], Vec::as_slice);
-                            let found = if shown.rhymes == RhymeShow::Off { &[] } else { found };
+                            let found = if shown.rhymes == RhymeShow::Off {
+                                &[]
+                            } else {
+                                found
+                            };
                             let spec = lyricview::Spec {
                                 size: 18.0,
                                 scale: 1.0,
                                 color: style::CREAM,
                                 fade: 1.0,
                                 effects: true,
-                                rhyme: if shown.rhymes == RhymeShow::Off { 0.0 } else { 1.0 },
+                                rhyme: if shown.rhymes == RhymeShow::Off {
+                                    0.0
+                                } else {
+                                    1.0
+                                },
                             };
                             lyricview::draw_line(ui, line, found, &spec, &look);
                         }
@@ -464,7 +496,11 @@ impl Skratch {
                             };
                             let fade = ctx.animate_value_with_time(id.with(1), fade, 0.25);
                             // rhyme colours fade out with distance from the sung line
-                            let reach = if here { 1.0 } else { (1.0 - away / 5.0).max(0.0) };
+                            let reach = if here {
+                                1.0
+                            } else {
+                                (1.0 - away / 5.0).max(0.0)
+                            };
                             let rhyme = ctx.animate_value_with_time(id.with(2), reach, 0.25);
                             let found = marks.get(i).map_or(&[][..], Vec::as_slice);
                             let show = match shown.rhymes {

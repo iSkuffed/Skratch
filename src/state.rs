@@ -66,6 +66,51 @@ impl Default for LyricStyle {
     }
 }
 
+/// Motion in the interface; every part can be switched off, and `animations` is the master switch.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Effects {
+    pub animations: bool,
+    /// The tonearm drops with a bounce, creeps inward as the song plays and lifts while seeking.
+    pub needle: bool,
+    /// Dragging the seek bar turns the record under the pointer.
+    pub scratch: bool,
+    /// Playhead glow, bars that follow the bass, and a scrub line on hover.
+    pub seek_life: bool,
+    /// Pages fade in, cards stagger in, covers crossfade and play/pause morphs.
+    pub transitions: bool,
+}
+
+impl Default for Effects {
+    fn default() -> Self {
+        Self {
+            animations: true,
+            needle: true,
+            scratch: true,
+            seek_life: true,
+            transitions: true,
+        }
+    }
+}
+
+impl Effects {
+    pub fn needle(&self) -> bool {
+        self.animations && self.needle
+    }
+
+    pub fn scratch(&self) -> bool {
+        self.animations && self.scratch
+    }
+
+    pub fn seek_life(&self) -> bool {
+        self.animations && self.seek_life
+    }
+
+    pub fn transitions(&self) -> bool {
+        self.animations && self.transitions
+    }
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Playlist {
     pub name: String,
@@ -106,6 +151,7 @@ pub struct SavedState {
     /// Missing lyrics may be looked up on lrclib.net; off until the user allows it.
     pub lyrics_online: bool,
     pub lyric_style: LyricStyle,
+    pub effects: Effects,
 }
 
 impl SavedState {

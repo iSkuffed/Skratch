@@ -44,7 +44,10 @@ fn dict() -> &'static Dict {
         let mut it = DATA.lines();
         let n: usize = it.next().and_then(|l| l.parse().ok()).unwrap_or(0);
         let tails = it.by_ref().take(n).collect();
-        Dict { tails, words: it.collect() }
+        Dict {
+            tails,
+            words: it.collect(),
+        }
     })
 }
 
@@ -62,13 +65,13 @@ fn lookup(word: &str) -> Option<&'static str> {
 const STOP: &[&str] = &[
     "the", "a", "an", "i", "you", "me", "my", "we", "to", "in", "it", "is", "and", "of", "on",
     "for", "that", "this", "with", "but", "so", "up", "no", "oh", "yeah", "uh", "ah", "ay", "ooh",
-    "hey", "he", "she", "they", "them", "us", "our", "your", "his", "her", "its", "at", "as",
-    "be", "am", "are", "was", "were", "do", "did", "have", "has", "had", "or", "if", "then",
-    "than", "not", "just", "all", "out", "off", "from", "by", "can", "will", "got", "get",
-    "like", "what", "who", "how", "why", "when", "where", "there", "here", "too", "now",
-    "i'm", "i'll", "i've", "i'd", "it's", "that's", "don't", "can't", "ain't", "you're",
-    "we're", "they're", "he's", "she's", "what's", "let's", "gonna", "wanna", "gotta",
-    "ya", "em", "cause", "uh-huh", "yo", "ha", "la", "na", "da",
+    "hey", "he", "she", "they", "them", "us", "our", "your", "his", "her", "its", "at", "as", "be",
+    "am", "are", "was", "were", "do", "did", "have", "has", "had", "or", "if", "then", "than",
+    "not", "just", "all", "out", "off", "from", "by", "can", "will", "got", "get", "like", "what",
+    "who", "how", "why", "when", "where", "there", "here", "too", "now", "i'm", "i'll", "i've",
+    "i'd", "it's", "that's", "don't", "can't", "ain't", "you're", "we're", "they're", "he's",
+    "she's", "what's", "let's", "gonna", "wanna", "gotta", "ya", "em", "cause", "uh-huh", "yo",
+    "ha", "la", "na", "da",
 ];
 
 struct Tok {
@@ -117,7 +120,13 @@ fn tokenize(line: &str) -> Vec<Tok> {
                 }
                 let (start, end) = (ch[i].0, ch.get(j).map_or(line.len(), |x| x.0));
                 let text = line[start..end].replace('’', "'").to_lowercase();
-                toks.push(Tok { start, end, text, paren: depth > 0, phrase });
+                toks.push(Tok {
+                    start,
+                    end,
+                    text,
+                    paren: depth > 0,
+                    phrase,
+                });
                 i = j;
                 continue;
             }
@@ -162,10 +171,10 @@ fn resolve(w: &str, guess: bool) -> Option<(String, bool)> {
     if hit.is_none() && bare.len() > 3 && bare.ends_with("in") {
         hit = find(&format!("{bare}g"));
     }
-    if hit.is_none() {
-        if let Some(b) = w.strip_suffix("'s") {
-            hit = find(b);
-        }
+    if hit.is_none()
+        && let Some(b) = w.strip_suffix("'s")
+    {
+        hit = find(b);
     }
     match hit {
         Some(mut t) => {
@@ -208,7 +217,10 @@ const VOWELS: [&str; 15] = [
 fn slant_key(tail: &str) -> (&str, bool) {
     let mut ph = tail.split(' ');
     let vowel = ph.next().unwrap_or("");
-    let voiceless = matches!(ph.last(), Some("P" | "T" | "K" | "F" | "S" | "TH" | "SH" | "CH" | "HH"));
+    let voiceless = matches!(
+        ph.next_back(),
+        Some("P" | "T" | "K" | "F" | "S" | "TH" | "SH" | "CH" | "HH")
+    );
     (vowel, voiceless)
 }
 
@@ -304,7 +316,9 @@ pub fn mark_verse(lines: &[&str]) -> Vec<Vec<Mark>> {
                 continue;
             }
             let is_end = Some(ti) == end_idx;
-            let Some((tail, exact)) = resolve(&t.text, true) else { continue };
+            let Some((tail, exact)) = resolve(&t.text, true) else {
+                continue;
+            };
             let phonemes = tail.split(' ').count();
             let letters = t.text.chars().filter(|c| c.is_alphabetic()).count();
             if STOP.contains(&t.text.as_str()) {
@@ -315,7 +329,11 @@ pub fn mark_verse(lines: &[&str]) -> Vec<Vec<Mark>> {
             } else if !is_end && phonemes < 2 && letters < 3 {
                 continue;
             }
-            let weak = if exact { weak_class(&tail) } else { spelling_weak(&t.text) };
+            let weak = if exact {
+                weak_class(&tail)
+            } else {
+                spelling_weak(&t.text)
+            };
             cands.push(Cand {
                 line: li,
                 start: t.start,
@@ -373,7 +391,12 @@ pub fn mark_verse(lines: &[&str]) -> Vec<Vec<Mark>> {
     // Greedy colouring in order of first line. A group avoids the colours of earlier groups
     // that end within 6 lines of where it starts; with every colour taken, reuse the one
     // whose conflicting group ended longest ago.
-    let span = |g: &Vec<usize>| (cands[g[0]].line, g.iter().map(|&i| cands[i].line).max().unwrap_or(0));
+    let span = |g: &Vec<usize>| {
+        (
+            cands[g[0]].line,
+            g.iter().map(|&i| cands[i].line).max().unwrap_or(0),
+        )
+    };
     let mut colour = vec![0usize; comps.len()];
     for k in 0..comps.len() {
         let lo = span(&comps[k]).0;
@@ -394,7 +417,11 @@ pub fn mark_verse(lines: &[&str]) -> Vec<Vec<Mark>> {
     for (g, &c) in comps.iter().zip(&colour) {
         for &i in g {
             let cd = &cands[i];
-            out[cd.line].push(Mark { start: cd.start, end: cd.end, group: c });
+            out[cd.line].push(Mark {
+                start: cd.start,
+                end: cd.end,
+                group: c,
+            });
         }
     }
     for l in &mut out {
@@ -424,7 +451,10 @@ mod tests {
 
     #[test]
     fn perfect_end_rhyme() {
-        let l = ["I got the world in the palm of mine", "Everything is gonna be just fine"];
+        let l = [
+            "I got the world in the palm of mine",
+            "Everything is gonna be just fine",
+        ];
         let m = mark_verse(&l);
         assert_eq!(words(l[0], &m[0]), ["mine"]);
         assert_eq!(words(l[1], &m[1]), ["fine"]);
@@ -433,7 +463,11 @@ mod tests {
 
     #[test]
     fn slant_end_rhyme() {
-        let l = ["never gonna change my mind", "everything is feeling fine", "we reach up to the heavens so high"];
+        let l = [
+            "never gonna change my mind",
+            "everything is feeling fine",
+            "we reach up to the heavens so high",
+        ];
         let m = mark_verse(&l);
         assert!(m.iter().all(|x| x.len() == 1), "{m:?}");
         assert_eq!(m[0][0].group, m[1][0].group);
@@ -466,7 +500,10 @@ mod tests {
 
     #[test]
     fn adlib_is_not_the_end_word() {
-        let l = ["Counting up the cash all night (what else?)", "Everything is looking right (yeah)"];
+        let l = [
+            "Counting up the cash all night (what else?)",
+            "Everything is looking right (yeah)",
+        ];
         let m = mark_verse(&l);
         assert_eq!(words(l[0], &m[0]), ["night"]);
         assert_eq!(words(l[1], &m[1]), ["right"]);
@@ -490,7 +527,10 @@ mod tests {
         assert!(ea && eb);
         assert_eq!(a, "IH T IH N");
         assert_eq!(b, "AE P IH N");
-        let l = ["Every day I'm hustlin' and gettin'", "Never stopping always sittin'"];
+        let l = [
+            "Every day I'm hustlin' and gettin'",
+            "Never stopping always sittin'",
+        ];
         let m = mark_verse(&l);
         assert_eq!(words(l[0], &m[0]), ["gettin'"]);
         assert_eq!(words(l[1], &m[1]), ["sittin'"]);
@@ -508,7 +548,11 @@ mod tests {
         assert!(none(&["I walk this road alone", "I walk this road alone"]));
         assert!(none(&["I walk this road alone", "and I feel so alone"]));
         // Repeats still join a group when a different word rhymes with them.
-        let l = ["I walk this road alone", "and I feel so alone", "cold as a stone"];
+        let l = [
+            "I walk this road alone",
+            "and I feel so alone",
+            "cold as a stone",
+        ];
         let m = mark_verse(&l);
         assert!(m.iter().all(|x| x.len() == 1), "{m:?}");
     }
@@ -520,11 +564,19 @@ mod tests {
 
     #[test]
     fn feminine_and_ing_families() {
-        let l = ["dancing with a girl named Lisa", "flying out to see Atlanta", "sipping on a cold Fanta"];
+        let l = [
+            "dancing with a girl named Lisa",
+            "flying out to see Atlanta",
+            "sipping on a cold Fanta",
+        ];
         let m = mark_verse(&l);
         assert!(m.iter().all(|x| x.len() == 1), "{m:?}");
         assert!(m[0][0].group == m[1][0].group && m[1][0].group == m[2][0].group);
-        let l = ["windows down and riding", "over every hill we're sliding", "every word is convincing"];
+        let l = [
+            "windows down and riding",
+            "over every hill we're sliding",
+            "every word is convincing",
+        ];
         let m = mark_verse(&l);
         assert!(m.iter().all(|x| x.len() == 1), "{m:?}");
         assert_eq!(m[0][0].group, m[2][0].group);
@@ -542,9 +594,20 @@ mod tests {
 
     #[test]
     fn rhymes_do_not_reach_across_the_song() {
-        let far = ["on the green", "count the cash", "feel the rain", "hold the fort", "he is so lean"];
+        let far = [
+            "on the green",
+            "count the cash",
+            "feel the rain",
+            "hold the fort",
+            "he is so lean",
+        ];
         assert!(none(&far)); // 4 lines apart: out of window
-        let near = ["on the green", "count the cash", "feel the rain", "he is so lean"];
+        let near = [
+            "on the green",
+            "count the cash",
+            "feel the rain",
+            "he is so lean",
+        ];
         assert!(!none(&near)); // 3 lines apart: linked
     }
 
@@ -565,7 +628,21 @@ mod tests {
 
     #[test]
     fn no_panics_on_odd_input() {
-        let l = ["", "   ", "...!!!", "(just an adlib)", "日本語 のうた", "café olé olé", "'''", "naïve ’tis don’t", "1234 5678", "-", "((", "))word((", "a-"];
+        let l = [
+            "",
+            "   ",
+            "...!!!",
+            "(just an adlib)",
+            "日本語 のうた",
+            "café olé olé",
+            "'''",
+            "naïve ’tis don’t",
+            "1234 5678",
+            "-",
+            "((",
+            "))word((",
+            "a-",
+        ];
         let m = mark_verse(&l);
         assert_eq!(m.len(), l.len());
         for (line, marks) in l.iter().zip(&m) {
@@ -578,8 +655,23 @@ mod tests {
 
     #[test]
     fn colours_stay_in_range_with_many_groups() {
-        let pairs = ["cat bat", "bear chair", "sky fly", "night light", "love dove", "moon spoon", "king ring", "hand land", "tree free", "rain pain", "star car"];
-        let l: Vec<String> = pairs.iter().flat_map(|p| p.split(' ').map(|w| format!("x {w}"))).collect();
+        let pairs = [
+            "cat bat",
+            "bear chair",
+            "sky fly",
+            "night light",
+            "love dove",
+            "moon spoon",
+            "king ring",
+            "hand land",
+            "tree free",
+            "rain pain",
+            "star car",
+        ];
+        let l: Vec<String> = pairs
+            .iter()
+            .flat_map(|p| p.split(' ').map(|w| format!("x {w}")))
+            .collect();
         let r: Vec<&str> = l.iter().map(|s| s.as_str()).collect();
         let m = mark_verse(&r);
         assert!(m.iter().flatten().all(|k| k.group < GROUPS));
@@ -614,8 +706,21 @@ mod tests {
         let m = mark_verse(&SONG);
         let marked: Vec<Vec<&str>> = SONG.iter().zip(&m).map(|(l, k)| words(l, k)).collect();
         let expect = [
-            "hand", "sand", "road", "load", "riding", "sliding", "convincing", "Lisa", "Atlanta",
-            "Fanta", "ends", "friends", "ends", "night", "right",
+            "hand",
+            "sand",
+            "road",
+            "load",
+            "riding",
+            "sliding",
+            "convincing",
+            "Lisa",
+            "Atlanta",
+            "Fanta",
+            "ends",
+            "friends",
+            "ends",
+            "night",
+            "right",
         ];
         for (i, w) in expect.iter().enumerate() {
             assert_eq!(marked[i], [*w], "line {i}");

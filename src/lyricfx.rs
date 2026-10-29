@@ -36,7 +36,11 @@ fn meaning(name: &str) -> Option<(u8, u8)> {
 }
 
 fn rhyme_name(rhyme: u8) -> String {
-    if rhyme == NO_RHYME { "norhyme".into() } else { format!("rhyme{rhyme}") }
+    if rhyme == NO_RHYME {
+        "norhyme".into()
+    } else {
+        format!("rhyme{rhyme}")
+    }
 }
 
 /// A line with its markup removed: the characters and the effects each one carries, plus where
@@ -58,7 +62,11 @@ impl Parsed {
 
 /// `{name,name|text}` at char `i` of `chars`: effects, rhyme, and where the text starts and ends.
 fn tag(chars: &[char], i: usize) -> Option<(u8, u8, usize, usize)> {
-    let bar = chars[i + 1..].iter().position(|c| matches!(c, '|' | '{' | '}'))? + i + 1;
+    let bar = chars[i + 1..]
+        .iter()
+        .position(|c| matches!(c, '|' | '{' | '}'))?
+        + i
+        + 1;
     if chars[bar] != '|' {
         return None;
     }
@@ -67,7 +75,11 @@ fn tag(chars: &[char], i: usize) -> Option<(u8, u8, usize, usize)> {
         let (f, r) = meaning(name.trim())?;
         Some((fx | f, if r != 0 { r } else { rhyme }))
     })?;
-    let close = chars[bar + 1..].iter().position(|c| matches!(c, '{' | '}'))? + bar + 1;
+    let close = chars[bar + 1..]
+        .iter()
+        .position(|c| matches!(c, '{' | '}'))?
+        + bar
+        + 1;
     (chars[close] == '}').then_some((fx, rhyme, bar + 1, close))
 }
 
@@ -79,8 +91,8 @@ pub fn parse(text: &str) -> Parsed {
         if chars[i] == '{'
             && let Some((fx, rhyme, from, to)) = tag(&chars, i)
         {
-            for at in from..to {
-                out.chars.push(chars[at]);
+            for (at, c) in chars.iter().enumerate().take(to).skip(from) {
+                out.chars.push(*c);
                 out.fx.push(fx);
                 out.rhyme.push(rhyme);
                 out.raw.push(at);
@@ -102,7 +114,7 @@ fn body_start(line: &[char]) -> usize {
     let mut at = 0;
     while line.get(at) == Some(&'[') {
         match line[at..].iter().position(|c| *c == ']') {
-            Some(close) if line[at + 1..at + close].iter().any(|c| *c == ':') => {
+            Some(close) if line[at + 1..at + close].contains(&':') => {
                 at += close + 1;
             }
             _ => break,
@@ -118,7 +130,11 @@ fn write(parsed: &Parsed) -> String {
     let mut at = 0;
     let plain = |c: char| !matches!(c, '{' | '}' | '|');
     let key = |i: usize| {
-        if plain(parsed.chars[i]) { (parsed.fx[i], parsed.rhyme[i]) } else { (0, 0) }
+        if plain(parsed.chars[i]) {
+            (parsed.fx[i], parsed.rhyme[i])
+        } else {
+            (0, 0)
+        }
     };
     while at < parsed.chars.len() {
         let (fx, rhyme) = key(at);
@@ -175,13 +191,12 @@ pub fn apply(text: &str, from: usize, to: usize, edit: Edit) -> String {
             let head: String = chars[..body].iter().collect();
             let mut parsed = parse(&chars[body..].iter().collect::<String>());
             let mut selected: Vec<usize> = (0..parsed.chars.len())
-                .filter(|i| {
-                    whole_line || (from..to).contains(&(start + body + parsed.raw[*i]))
-                })
+                .filter(|i| whole_line || (from..to).contains(&(start + body + parsed.raw[*i])))
                 .collect();
             // a rhyme with nothing selected means the line's last word, not the whole line
             if whole_line && matches!(edit, Edit::Rhyme(_)) {
-                let word = |i: &usize| parsed.chars[*i].is_alphanumeric() || parsed.chars[*i] == '\'';
+                let word =
+                    |i: &usize| parsed.chars[*i].is_alphanumeric() || parsed.chars[*i] == '\'';
                 if let Some(last) = selected.iter().rposition(word) {
                     let first = selected[..=last]
                         .iter()
@@ -228,7 +243,10 @@ mod tests {
         assert_eq!(parsed.fx[0], 0);
         let rhymed = parse("one {rhyme3|two} {wave,norhyme|three}");
         assert_eq!(rhymed.plain(), "one two three");
-        assert_eq!((rhymed.rhyme[4], rhymed.rhyme[8], rhymed.fx[8]), (3, NO_RHYME, WAVE));
+        assert_eq!(
+            (rhymed.rhyme[4], rhymed.rhyme[8], rhymed.fx[8]),
+            (3, NO_RHYME, WAVE)
+        );
         assert_eq!(write(&rhymed), "one {rhyme3|two} {wave,norhyme|three}");
         assert_eq!(parse("{rhyme9|x}").plain(), "{rhyme9|x}");
         assert_eq!(write(&parsed), "a {rainbow,wave|big} {nope|x} day");
@@ -247,14 +265,28 @@ mod tests {
             apply(text, 3, 3, Edit::Toggle(WAVE)),
             "[00:01.00]{wave|one two three}\nsecond"
         );
-        assert_eq!(apply(&apply(text, 3, 3, Edit::Toggle(WAVE)), 3, 3, Edit::ClearEffects), text);
+        assert_eq!(
+            apply(
+                &apply(text, 3, 3, Edit::Toggle(WAVE)),
+                3,
+                3,
+                Edit::ClearEffects
+            ),
+            text
+        );
         // a rhyme colour on the same word as an effect, and again to undo it
         let coloured = apply(text, 14, 17, Edit::Rhyme(2));
         assert_eq!(coloured, "[00:01.00]one {rhyme2|two} three\nsecond");
-        assert_eq!(apply(&coloured, 14, 25, Edit::Toggle(WAVE)), "[00:01.00]one {wave,rhyme2|two} three\nsecond");
+        assert_eq!(
+            apply(&coloured, 14, 25, Edit::Toggle(WAVE)),
+            "[00:01.00]one {wave,rhyme2|two} three\nsecond"
+        );
         assert_eq!(apply(&coloured, 14, 25, Edit::Rhyme(2)), text);
         // with nothing selected a rhyme goes on the last word only
-        assert_eq!(apply(text, 3, 3, Edit::Rhyme(1)), "[00:01.00]one two {rhyme1|three}\nsecond");
+        assert_eq!(
+            apply(text, 3, 3, Edit::Rhyme(1)),
+            "[00:01.00]one two {rhyme1|three}\nsecond"
+        );
         // effects stack
         assert_eq!(
             apply(&marked, 14, 25, Edit::Toggle(SHAKE)),
