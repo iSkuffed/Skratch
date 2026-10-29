@@ -636,6 +636,17 @@ mod tests {
     }
 
     #[test]
+    fn a_later_secondary_stress_decides_the_rhyme() {
+        // alkaline is AE1 .. AY2 N: it ends like nine, not like "ale"
+        let l = ["I'm sippin' on triple nine", "light it up like alkaline"];
+        let m = mark_verse(&l);
+        assert!(
+            m.iter().all(|x| x.len() == 1) && m[0][0].group == m[1][0].group,
+            "{m:?}"
+        );
+    }
+
+    #[test]
     fn danger_stranger() {
         let l = ["I see the danger", "in every stranger"];
         let m = mark_verse(&l);

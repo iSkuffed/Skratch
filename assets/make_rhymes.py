@@ -9,7 +9,7 @@ Output format (read by src/rhyme.rs):
     line 1        N, the number of rhyme tails
     next N lines  one rhyme tail each, e.g. "AY N"; a tail's code is its line index in base 36
     rest          "word code" lines, sorted by byte order (so they can be binary-searched)
-A rhyme tail = phonemes from the last stressed vowel (stress 1, else 2, else the last
+A rhyme tail = phonemes from the last stressed vowel (stress 1 or 2, else the last
 vowel) to the end, stress digits stripped. Its first phoneme is the final stressed vowel.
 """
 import re
@@ -36,13 +36,11 @@ def b36(n):
 
 
 def tail(phones):
+    # the last vowel with primary or secondary stress, so alkaline (AE1 .. AY2 N) rhymes with nine
     idx = None
-    for stress in "12":
-        for i in range(len(phones) - 1, -1, -1):
-            if phones[i].endswith(stress):
-                idx = i
-                break
-        if idx is not None:
+    for i in range(len(phones) - 1, -1, -1):
+        if phones[i].endswith(("1", "2")):
+            idx = i
             break
     if idx is None:
         for i in range(len(phones) - 1, -1, -1):
