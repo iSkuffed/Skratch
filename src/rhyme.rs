@@ -264,14 +264,35 @@ fn spelling_weak(w: &str) -> Option<&'static str> {
     }
 }
 
+/// The same word said again, or a simple variation of it (love/loves, lovin'/loving).
+fn same_word(a: &str, b: &str) -> bool {
+    let bases = |w: &str| -> Vec<String> {
+        let w = match w.strip_suffix("in'") {
+            Some(stem) => format!("{stem}ing"),
+            None => w.trim_end_matches('\'').to_string(),
+        };
+        let mut all = vec![w.clone()];
+        for suffix in ["ing", "ed", "es", "s"] {
+            if let Some(base) = w.strip_suffix(suffix)
+                && base.chars().count() >= 3
+            {
+                all.push(base.to_string());
+            }
+        }
+        all
+    };
+    let other = bases(b);
+    bases(a).iter().any(|base| other.contains(base))
+}
+
 /// Can `a` (earlier) and `b` be linked at `level`? 0 = equal tail, 1 = slant, 2 = weak.
-/// Identical spellings never link.
+/// A line ending on the same word again links at level 0, whatever its sound.
 fn linkable(level: usize, a: &Cand, b: &Cand) -> bool {
-    if a.word == b.word {
-        return false;
-    }
     let d = b.line - a.line;
     let both_end = a.is_end && b.is_end;
+    if same_word(&a.word, &b.word) {
+        return level == 0 && both_end && d <= 3;
+    }
     // Line-end words may be 3 lines apart; anything involving a mid-line phrase end only 1.
     let window = if both_end { 3 } else { 1 };
     match level {
@@ -382,10 +403,7 @@ pub fn mark_verse(lines: &[&str]) -> Vec<Vec<Mark>> {
         let r = find(&mut uf, i);
         comps.entry(r).or_default().push(i);
     }
-    let mut comps: Vec<Vec<usize>> = comps
-        .into_values()
-        .filter(|g| g.iter().any(|&i| cands[i].word != cands[g[0]].word))
-        .collect();
+    let mut comps: Vec<Vec<usize>> = comps.into_values().filter(|g| g.len() >= 2).collect();
     comps.sort_by_key(|g| g[0]);
 
     // Greedy colouring in order of first line. A group avoids the colours of earlier groups
@@ -544,10 +562,15 @@ mod tests {
     }
 
     #[test]
-    fn identical_word_is_not_a_rhyme() {
+    fn a_repeated_end_word_is_a_rhyme() {
+        // two identical lines are a repeated hook, not a rhyme
         assert!(none(&["I walk this road alone", "I walk this road alone"]));
-        assert!(none(&["I walk this road alone", "and I feel so alone"]));
-        // Repeats still join a group when a different word rhymes with them.
+        let m = mark_verse(&["I walk this road alone", "and I feel so alone"]);
+        assert!(
+            m.iter().all(|x| x.len() == 1) && m[0][0].group == m[1][0].group,
+            "{m:?}"
+        );
+        // and it joins a group with a different word that rhymes
         let l = [
             "I walk this road alone",
             "and I feel so alone",
@@ -555,6 +578,34 @@ mod tests {
         ];
         let m = mark_verse(&l);
         assert!(m.iter().all(|x| x.len() == 1), "{m:?}");
+        assert!(
+            m[0][0].group == m[1][0].group && m[1][0].group == m[2][0].group,
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn a_chorus_that_changes_a_word_still_marks_its_repeats() {
+        let l = [
+            "Demons hold onto her hair",
+            "She told me put my love over there",
+            "She told me leave my love over there",
+            "She told me put my love over there",
+        ];
+        let m = mark_verse(&l);
+        let group = m[1][0].group;
+        assert!(
+            m[1..].iter().all(|x| x.len() == 1 && x[0].group == group),
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn variations_of_a_word_count_as_the_same_word() {
+        assert!(same_word("love", "loves"));
+        assert!(same_word("lovin'", "loving"));
+        assert!(!same_word("tell", "tall"));
+        assert!(!same_word("is", "as"));
     }
 
     #[test]
@@ -581,7 +632,7 @@ mod tests {
         assert!(m.iter().all(|x| x.len() == 1), "{m:?}");
         assert_eq!(m[0][0].group, m[2][0].group);
         // The weak rule only reaches 2 lines.
-        assert!(none(&["girl named Lisa", "x", "x x", "see Fanta"]));
+        assert!(none(&["girl named Lisa", "red", "blue", "see Fanta"]));
     }
 
     #[test]
