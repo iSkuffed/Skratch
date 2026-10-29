@@ -46,6 +46,8 @@ pub struct LyricStyle {
     pub ad_libs: bool,
     /// Draw the `{effect|words}` formatting written in the lyrics.
     pub effects: bool,
+    /// ...but only on the line being sung, like a lyric video.
+    pub effects_live_only: bool,
     /// Let effects move (rainbow, wave, shake); off holds them still.
     pub animate: bool,
     pub rhymes: RhymeShow,
@@ -57,6 +59,7 @@ impl Default for LyricStyle {
             fade: true,
             ad_libs: true,
             effects: true,
+            effects_live_only: true,
             animate: true,
             rhymes: RhymeShow::All,
         }

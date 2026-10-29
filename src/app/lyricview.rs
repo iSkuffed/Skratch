@@ -68,18 +68,39 @@ struct Look1 {
     italic: bool,
 }
 
-/// Draws `text` (markup included) in `width`, `base` sized and coloured and faded by `fade`
-/// (1 is solid). `marks` are the rhyme groups to colour, as byte ranges of the plain text.
+/// The most a line is scaled up; lines wrap early enough for the scaled text to still fit.
+pub const LIVE_SCALE: f32 = 1.25;
+
+/// How one line is drawn.
+pub struct Spec {
+    pub size: f32,
+    pub color: Color32,
+    /// Drawn this much bigger around the line's left edge. Scaling happens when painting, so the
+    /// text is never laid out again and the list never moves while a line grows or shrinks.
+    pub scale: f32,
+    /// Opacity, applied when painting so that fading never needs the text laid out again.
+    pub fade: f32,
+    /// Draw the line's `{effect|words}` markup.
+    pub effects: bool,
+    /// How strongly rhyme colours show, 0 (plain text) to 1.
+    pub rhyme: f32,
+}
+
+/// Draws `text` (markup included) wrapped to the available width. `marks` are the rhyme groups
+/// to colour, as byte ranges of the plain text.
 pub fn draw_line(
     ui: &mut egui::Ui,
     text: &str,
     marks: &[Mark],
-    (base, color, fade): (f32, Color32, f32),
+    spec: &Spec,
     look: &Look,
 ) -> Response {
+    let (base, color, fade) = (spec.size, spec.color, spec.fade);
+    // steps of a tenth, so a fading colour does not make a new layout on every frame
+    let rhyme = (spec.rhyme.clamp(0.0, 1.0) * 10.0).round() / 10.0;
     let style = look.style;
     let mut parsed = lyricfx::parse(text);
-    if !style.effects {
+    if !style.effects || !spec.effects {
         parsed.fx.iter_mut().for_each(|fx| *fx = 0);
     }
     let count = parsed.chars.len();
@@ -125,8 +146,10 @@ pub fn draw_line(
             size *= 0.82;
             color = color.gamma_multiply(0.7);
         }
-        if let Some(g) = group[i] {
-            color = rhyme_color(g);
+        if let Some(g) = group[i]
+            && rhyme > 0.0
+        {
+            color = color.lerp_to_gamma(rhyme_color(g), rhyme);
         }
         if fx & RAINBOW != 0 {
             let phase = if animate { look.time as f32 * 0.5 } else { 0.0 };
@@ -134,7 +157,7 @@ pub fn draw_line(
         }
         Look1 {
             size,
-            color: color.gamma_multiply(fade),
+            color,
             italic: fx & ITALIC != 0 || adlib[i],
         }
     };
@@ -152,6 +175,15 @@ pub fn draw_line(
     }
 
     let width = ui.available_width();
+    // lines far outside the view are not laid out again: their height is remembered
+    let key = egui::Id::new(("lyric-height", text, width as i32, base as i32));
+    if let Some(height) = ui.data(|d| d.get_temp::<f32>(key)) {
+        let rect = egui::Rect::from_min_size(ui.cursor().min, Vec2::new(width, height));
+        if !ui.clip_rect().expand(300.0).intersects(rect) {
+            return ui.allocate_rect(rect, Sense::click());
+        }
+    }
+    let wrap = width / LIVE_SCALE;
     let painter = ui.painter().clone();
     let layout = |text: String, look: Look1| {
         let mut job = LayoutJob::default();
@@ -195,7 +227,7 @@ pub fn draw_line(
                 .take_while(|(g, ..)| g.text().trim().is_empty())
                 .map(|(g, ..)| g.size().x)
                 .sum::<f32>();
-        if x > 0.0 && x + visible_w > width {
+        if x > 0.0 && x + visible_w > wrap {
             for piece in &mut pieces[row_start..] {
                 piece.at.y += (row_h - piece.galley.size().y) / 2.0;
             }
@@ -221,9 +253,12 @@ pub fn draw_line(
         piece.at.y += (row_h - piece.galley.size().y) / 2.0;
     }
     let height = (y + row_h).max(base * 1.3);
+    ui.data_mut(|d| d.insert_temp(key, height));
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
     let time = look.time as f32;
+    let mut painter = ui.painter().clone();
+    painter.set_opacity(fade);
     for piece in &pieces {
         let mut at: Pos2 = rect.min + piece.at;
         if animate {
@@ -237,7 +272,13 @@ pub fn draw_line(
                 at += Vec2::new(jitter(0), jitter(8));
             }
         }
-        ui.painter().galley(at, piece.galley.clone(), Color32::WHITE);
+        let mut shape = egui::Shape::galley(at, piece.galley.clone(), Color32::WHITE);
+        if spec.scale != 1.0 {
+            let pivot = Pos2::new(rect.left(), rect.center().y).to_vec2();
+            let grow = egui::emath::TSTransform::new(pivot - spec.scale * pivot, spec.scale);
+            shape.transform(grow);
+        }
+        painter.add(shape);
     }
     if animate && any_moving && ui.is_rect_visible(rect) {
         ui.ctx().request_repaint_after(Duration::from_millis(33));

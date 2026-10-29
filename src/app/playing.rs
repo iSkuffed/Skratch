@@ -218,9 +218,10 @@ impl Skratch {
     fn lyric_style_menu(&mut self, ui: &mut egui::Ui) {
         let style = &mut self.state.lyric_style;
         ui.label(RichText::new("Display").small().color(style::CREAM_DIM));
-        ui.checkbox(&mut style.fade, "Fade and shrink lines away from the current one");
+        ui.checkbox(&mut style.fade, "Fade lines away from the current one");
         ui.checkbox(&mut style.ad_libs, "Smaller, dimmer (ad-libs)");
         ui.checkbox(&mut style.effects, "Show text effects ({wave|...})");
+        ui.checkbox(&mut style.effects_live_only, "Effects only on the line being sung");
         ui.checkbox(&mut style.animate, "Animate effects");
         ui.horizontal(|ui| {
             ui.label("Rhymes");
@@ -400,7 +401,15 @@ impl Skratch {
                         for (i, line) in text.lines().enumerate() {
                             let found = marks.get(i).map_or(&[][..], Vec::as_slice);
                             let found = if shown.rhymes == RhymeShow::Off { &[] } else { found };
-                            lyricview::draw_line(ui, line, found, (18.0, style::CREAM, 1.0), &look);
+                            let spec = lyricview::Spec {
+                                size: 18.0,
+                                scale: 1.0,
+                                color: style::CREAM,
+                                fade: 1.0,
+                                effects: true,
+                                rhyme: 1.0,
+                            };
+                            lyricview::draw_line(ui, line, found, &spec, &look);
                         }
                     });
             }
@@ -418,24 +427,38 @@ impl Skratch {
                                 continue;
                             }
                             let here = Some(i) == current;
-                            // the line being sung is big and bright; the rest shrink and fade
+                            // every line is laid out the same; the sung one is drawn bigger
                             let away = current.map_or(1, |c| i.abs_diff(c)) as f32;
-                            let (size, fade) = match (shown.fade, here) {
-                                (_, true) => (26.0, 1.0),
-                                (true, false) => (19.0 + 3.0 / away.max(1.0), (1.0 - 0.1 * away).max(0.3)),
-                                (false, false) => (19.0, 0.8),
-                            };
                             let id = egui::Id::new(("lyric-line", i));
-                            let size = ui.ctx().animate_value_with_time(id.with(0), size, 0.25);
-                            let fade = ui.ctx().animate_value_with_time(id.with(1), fade, 0.25);
+                            let ctx = ui.ctx();
+                            let live = if here { lyricview::LIVE_SCALE } else { 1.0 };
+                            let scale = ctx.animate_value_with_time(id.with(0), live, 0.25);
+                            let fade = if here {
+                                1.0
+                            } else if shown.fade {
+                                (0.95 - 0.1 * away).max(0.3)
+                            } else {
+                                0.8
+                            };
+                            let fade = ctx.animate_value_with_time(id.with(1), fade, 0.25);
+                            // rhyme colours fade out with distance from the sung line
+                            let reach = if here { 1.0 } else { (1.0 - away / 5.0).max(0.0) };
+                            let rhyme = ctx.animate_value_with_time(id.with(2), reach, 0.25);
                             let found = marks.get(i).map_or(&[][..], Vec::as_slice);
                             let found = match shown.rhymes {
                                 RhymeShow::All => found,
                                 RhymeShow::Current if here => found,
                                 _ => &[],
                             };
-                            let color = if here { self.accent } else { style::CREAM_DIM };
-                            let line = lyricview::draw_line(ui, text, found, (size, color, fade), &look)
+                            let spec = lyricview::Spec {
+                                size: 20.0,
+                                scale,
+                                color: if here { self.accent } else { style::CREAM_DIM },
+                                fade,
+                                effects: here || !shown.effects_live_only,
+                                rhyme,
+                            };
+                            let line = lyricview::draw_line(ui, text, found, &spec, &look)
                                 .on_hover_cursor(egui::CursorIcon::PointingHand);
                             if line.clicked() {
                                 self.action = Some(Action::Seek(*time));
