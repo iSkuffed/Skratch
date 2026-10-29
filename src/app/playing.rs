@@ -278,7 +278,7 @@ impl Skratch {
             .color(style::CREAM_DIM),
         );
         // effects wrap the selected words, or the whole line when nothing is selected
-        let mut effect: Option<Option<u8>> = None;
+        let mut effect: Option<lyricfx::Edit> = None;
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Effect").small().color(style::CREAM_DIM));
             for (name, flag) in lyricfx::NAMES {
@@ -287,14 +287,36 @@ impl Skratch {
                     .on_hover_text("Selected words, or the whole line if nothing is selected. Again to remove.")
                     .clicked()
                 {
-                    effect = Some(Some(flag));
+                    effect = Some(lyricfx::Edit::Toggle(flag));
                 }
             }
             if ui.small_button("clear").on_hover_text("Remove effects from the selection or line").clicked() {
-                effect = Some(None);
+                effect = Some(lyricfx::Edit::ClearEffects);
             }
         });
-        let room = (ui.available_height() - 72.0).max(80.0);
+        // hand-set rhymes: the same colour on words that rhyme, whatever the dictionary thinks
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Rhyme").small().color(style::CREAM_DIM));
+            for n in 1..=lyricfx::RHYME_COLORS {
+                let swatch = egui::Button::new(RichText::new("  ").small())
+                    .fill(lyricview::rhyme_color(usize::from(n) - 1))
+                    .min_size(vec2(22.0, 16.0));
+                if ui
+                    .add(swatch)
+                    .on_hover_text("Colour the selected words (or the line's last word if nothing is selected) as one rhyme. Again to undo.")
+                    .clicked()
+                {
+                    effect = Some(lyricfx::Edit::Rhyme(n));
+                }
+            }
+            if ui.small_button("never").on_hover_text("These words are never coloured").clicked() {
+                effect = Some(lyricfx::Edit::Rhyme(lyricfx::NO_RHYME));
+            }
+            if ui.small_button("auto").on_hover_text("Back to the automatic rhymes").clicked() {
+                effect = Some(lyricfx::Edit::Rhyme(0));
+            }
+        });
+        let room = (ui.available_height() - 96.0).max(80.0);
         egui::ScrollArea::vertical().max_height(room).show(ui, |ui| {
             ui.add(
                 egui::TextEdit::multiline(&mut text)
@@ -407,7 +429,7 @@ impl Skratch {
                                 color: style::CREAM,
                                 fade: 1.0,
                                 effects: true,
-                                rhyme: 1.0,
+                                rhyme: if shown.rhymes == RhymeShow::Off { 0.0 } else { 1.0 },
                             };
                             lyricview::draw_line(ui, line, found, &spec, &look);
                         }
@@ -445,18 +467,19 @@ impl Skratch {
                             let reach = if here { 1.0 } else { (1.0 - away / 5.0).max(0.0) };
                             let rhyme = ctx.animate_value_with_time(id.with(2), reach, 0.25);
                             let found = marks.get(i).map_or(&[][..], Vec::as_slice);
-                            let found = match shown.rhymes {
-                                RhymeShow::All => found,
-                                RhymeShow::Current if here => found,
-                                _ => &[],
+                            let show = match shown.rhymes {
+                                RhymeShow::All => true,
+                                RhymeShow::Current => here,
+                                RhymeShow::Off => false,
                             };
+                            let found = if show { found } else { &[] };
                             let spec = lyricview::Spec {
                                 size: 20.0,
                                 scale,
                                 color: if here { self.accent } else { style::CREAM_DIM },
                                 fade,
                                 effects: here || !shown.effects_live_only,
-                                rhyme,
+                                rhyme: if show { rhyme } else { 0.0 },
                             };
                             let line = lyricview::draw_line(ui, text, found, &spec, &look)
                                 .on_hover_cursor(egui::CursorIcon::PointingHand);

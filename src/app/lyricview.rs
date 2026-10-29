@@ -146,7 +146,13 @@ pub fn draw_line(
             size *= 0.82;
             color = color.gamma_multiply(0.7);
         }
-        if let Some(g) = group[i]
+        // a rhyme set by hand beats the dictionary's guess
+        let set = match parsed.rhyme[i] {
+            0 => group[i],
+            lyricfx::NO_RHYME => None,
+            n => Some(usize::from(n) - 1),
+        };
+        if let Some(g) = set
             && rhyme > 0.0
         {
             color = color.lerp_to_gamma(rhyme_color(g), rhyme);
