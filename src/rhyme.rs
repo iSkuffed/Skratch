@@ -212,6 +212,14 @@ fn slant_key(tail: &str) -> (&str, bool) {
     (vowel, voiceless)
 }
 
+/// Vowels many accents say alike (the "cot/caught" merger, "Fanta" with the vowel of "cat"), so
+/// two tails that differ only by one of these pairs still rhyme.
+fn near_tail(a: &str, b: &str) -> bool {
+    let (va, ra) = a.split_once(' ').unwrap_or((a, ""));
+    let (vb, rb) = b.split_once(' ').unwrap_or((b, ""));
+    ra == rb && matches!((va, vb), ("AA", "AE" | "AO") | ("AE" | "AO", "AA"))
+}
+
 /// Weak class for words with an unstressed ending: the final unstressed vowel
 /// (Lisa/Atlanta/Fanta -> "AH"), or "ING" for the -ing / -in' family. A tail has at
 /// least two vowels here, because it starts at the last *stressed* vowel.
@@ -256,7 +264,12 @@ fn linkable(level: usize, a: &Cand, b: &Cand) -> bool {
     let window = if both_end { 3 } else { 1 };
     match level {
         0 => d <= window && a.tail == b.tail,
-        1 => d <= window && a.exact && b.exact && slant_key(&a.tail) == slant_key(&b.tail),
+        1 => {
+            d <= window
+                && a.exact
+                && b.exact
+                && (slant_key(&a.tail) == slant_key(&b.tail) || near_tail(&a.tail, &b.tail))
+        }
         _ => both_end && d <= 2 && a.weak.is_some() && a.weak == b.weak,
     }
 }
@@ -425,6 +438,16 @@ mod tests {
         assert!(m.iter().all(|x| x.len() == 1), "{m:?}");
         assert_eq!(m[0][0].group, m[1][0].group);
         assert_eq!(m[0][0].group, m[2][0].group);
+    }
+
+    #[test]
+    fn fanta_and_atlanta_rhyme_whatever_the_dictionary_says() {
+        // the dictionary gives Fanta the vowel of "father", Atlanta the vowel of "cat"
+        let l = ["flying out to see Atlanta", "sipping on a cold Fanta"];
+        let m = mark_verse(&l);
+        assert_eq!(words(l[0], &m[0]), ["Atlanta"]);
+        assert_eq!(words(l[1], &m[1]), ["Fanta"]);
+        assert_eq!(m[0][0].group, m[1][0].group);
     }
 
     #[test]
