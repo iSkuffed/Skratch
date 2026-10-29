@@ -25,6 +25,7 @@ use std::{
 };
 
 mod fetch;
+mod lyricview;
 mod playing;
 mod setup;
 

@@ -26,6 +26,43 @@ impl NowPanel {
     }
 }
 
+/// Which lines get their rhymes coloured.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RhymeShow {
+    Off,
+    /// Only the line being sung.
+    Current,
+    #[default]
+    All,
+}
+
+/// How the lyrics panel looks; every part can be switched off.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LyricStyle {
+    /// Lines shrink and fade the further they are from the one being sung.
+    pub fade: bool,
+    /// Ad-libs in (brackets) are drawn smaller and dimmer.
+    pub ad_libs: bool,
+    /// Draw the `{effect|words}` formatting written in the lyrics.
+    pub effects: bool,
+    /// Let effects move (rainbow, wave, shake); off holds them still.
+    pub animate: bool,
+    pub rhymes: RhymeShow,
+}
+
+impl Default for LyricStyle {
+    fn default() -> Self {
+        Self {
+            fade: true,
+            ad_libs: true,
+            effects: true,
+            animate: true,
+            rhymes: RhymeShow::All,
+        }
+    }
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Playlist {
     pub name: String,
@@ -65,6 +102,7 @@ pub struct SavedState {
     pub now_panel: NowPanel,
     /// Missing lyrics may be looked up on lrclib.net; off until the user allows it.
     pub lyrics_online: bool,
+    pub lyric_style: LyricStyle,
 }
 
 impl SavedState {

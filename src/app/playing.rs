@@ -1,13 +1,14 @@
 //! The "Now playing" page: a big spinning record next to a panel the user can switch
 //! between the track details, the queue and the whole library.
-use super::{Action, Skratch, display};
+use super::{Action, Skratch, display, lyricview};
 use crate::{
-    state::{NowPanel, Source},
+    state::{NowPanel, RhymeShow, Source},
     style,
 };
 use eframe::egui::{self, Align, RichText, Sense, pos2, vec2};
 use eframe::egui::text::{CCursor, CCursorRange};
 use skratch::{
+    lyricfx,
     lyrics::{self, Lyrics, Status},
     model::Track,
 };
@@ -133,7 +134,12 @@ impl Skratch {
                         }
                     });
                 if panel == NowPanel::Lyrics {
-                    ui.menu_button("...", |ui| self.lyrics_menu(ui, track));
+                    // stays open while display options are ticked; the actions close it themselves
+                    let config = egui::containers::menu::MenuConfig::new()
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+                    egui::containers::menu::MenuButton::new("...")
+                        .config(config)
+                        .ui(ui, |ui| self.lyrics_menu(ui, track));
                 }
             });
         });
@@ -193,6 +199,9 @@ impl Skratch {
             self.save_lyrics(&dir, track, "");
             ui.close();
         }
+        ui.separator();
+        self.lyric_style_menu(ui);
+        ui.separator();
         if lyrics::has_user_version(&dir, track)
             && ui
                 .button("Back to automatic lyrics")
@@ -202,6 +211,29 @@ impl Skratch {
             lyrics::restore(&dir, track);
             self.lyrics.retry();
             ui.close();
+        }
+    }
+
+    /// Every effect on the lyrics panel can be switched off here.
+    fn lyric_style_menu(&mut self, ui: &mut egui::Ui) {
+        let style = &mut self.state.lyric_style;
+        ui.label(RichText::new("Display").small().color(style::CREAM_DIM));
+        ui.checkbox(&mut style.fade, "Fade and shrink lines away from the current one");
+        ui.checkbox(&mut style.ad_libs, "Smaller, dimmer (ad-libs)");
+        ui.checkbox(&mut style.effects, "Show text effects ({wave|...})");
+        ui.checkbox(&mut style.animate, "Animate effects");
+        ui.horizontal(|ui| {
+            ui.label("Rhymes");
+            for (shown, name) in [
+                (RhymeShow::Off, "Off"),
+                (RhymeShow::Current, "Current line"),
+                (RhymeShow::All, "All lines"),
+            ] {
+                ui.selectable_value(&mut style.rhymes, shown, name);
+            }
+        });
+        if ui.button("Reset display").clicked() {
+            *style = Default::default();
         }
     }
 
@@ -239,12 +271,29 @@ impl Skratch {
         let stamp_key = ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter));
         ui.label(
             RichText::new(
-                "One line per lyric. Add [mm:ss.xx] to the start of a line to make it follow the song.",
+                "One line per lyric. Add [mm:ss.xx] to the start of a line to make it follow the song; effects are written as {wave|words}.",
             )
             .small()
             .color(style::CREAM_DIM),
         );
-        let room = (ui.available_height() - 48.0).max(80.0);
+        // effects wrap the selected words, or the whole line when nothing is selected
+        let mut effect: Option<Option<u8>> = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Effect").small().color(style::CREAM_DIM));
+            for (name, flag) in lyricfx::NAMES {
+                if ui
+                    .small_button(name)
+                    .on_hover_text("Selected words, or the whole line if nothing is selected. Again to remove.")
+                    .clicked()
+                {
+                    effect = Some(Some(flag));
+                }
+            }
+            if ui.small_button("clear").on_hover_text("Remove effects from the selection or line").clicked() {
+                effect = Some(None);
+            }
+        });
+        let room = (ui.available_height() - 72.0).max(80.0);
         egui::ScrollArea::vertical().max_height(room).show(ui, |ui| {
             ui.add(
                 egui::TextEdit::multiline(&mut text)
@@ -276,6 +325,15 @@ impl Skratch {
             state
                 .cursor
                 .set_char_range(Some(CCursorRange::one(CCursor::new(next))));
+            state.store(ui.ctx(), id);
+            ui.memory_mut(|m| m.request_focus(id));
+        }
+        if let Some(effect) = effect {
+            let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+            let (a, b) = state.cursor.char_range().map_or((0, 0), |r| (r.primary.index, r.secondary.index));
+            text = lyricfx::apply(&text, a, b, effect);
+            let end = text.chars().count();
+            state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(a.min(end)), CCursor::new(b.min(end)))));
             state.store(ui.ctx(), id);
             ui.memory_mut(|m| m.request_focus(id));
         }
@@ -312,6 +370,21 @@ impl Skratch {
             return;
         }
         let height = ui.available_height();
+        let shown = self.state.lyric_style.clone();
+        let look = lyricview::Look {
+            style: &shown,
+            time: ui.input(|i| i.time),
+        };
+        if self.lyrics.marks.is_none()
+            && shown.rhymes != RhymeShow::Off
+            && let Status::Found(found) = &self.lyrics.status
+        {
+            let texts: Vec<String> = match found {
+                Lyrics::Plain(text) => text.lines().map(String::from).collect(),
+                Lyrics::Synced(lines) => lines.iter().map(|(_, t)| t.clone()).collect(),
+            };
+            self.lyrics.marks = Some(lyricview::rhyme_marks(&texts));
+        }
         let dim = |text: String| RichText::new(text).size(18.0).color(style::CREAM_DIM);
         match &self.lyrics.status {
             Status::Loading => {
@@ -319,17 +392,21 @@ impl Skratch {
                 ui.label(dim("Looking for lyrics...".into()));
             }
             Status::Found(Lyrics::Plain(text)) => {
+                let marks = self.lyrics.marks.as_deref().unwrap_or(&[]);
                 egui::ScrollArea::vertical()
                     .id_salt("lyrics")
                     .auto_shrink(false)
                     .show(ui, |ui| {
-                        for line in text.lines() {
-                            ui.label(RichText::new(line).size(18.0).color(style::CREAM));
+                        for (i, line) in text.lines().enumerate() {
+                            let found = marks.get(i).map_or(&[][..], Vec::as_slice);
+                            let found = if shown.rhymes == RhymeShow::Off { &[] } else { found };
+                            lyricview::draw_line(ui, line, found, (18.0, style::CREAM, 1.0), &look);
                         }
                     });
             }
             Status::Found(Lyrics::Synced(lines)) => {
                 let current = lines.partition_point(|(t, _)| *t <= now).checked_sub(1);
+                let marks = self.lyrics.marks.as_deref().unwrap_or(&[]);
                 egui::ScrollArea::vertical()
                     .id_salt("lyrics")
                     .auto_shrink(false)
@@ -341,16 +418,24 @@ impl Skratch {
                                 continue;
                             }
                             let here = Some(i) == current;
-                            let rich = RichText::new(text).size(if here { 26.0 } else { 19.0 });
-                            let line = ui
-                                .add(
-                                    egui::Label::new(if here {
-                                        rich.strong().color(self.accent)
-                                    } else {
-                                        rich.color(style::CREAM_DIM)
-                                    })
-                                    .sense(Sense::click()),
-                                )
+                            // the line being sung is big and bright; the rest shrink and fade
+                            let away = current.map_or(1, |c| i.abs_diff(c)) as f32;
+                            let (size, fade) = match (shown.fade, here) {
+                                (_, true) => (26.0, 1.0),
+                                (true, false) => (19.0 + 3.0 / away.max(1.0), (1.0 - 0.1 * away).max(0.3)),
+                                (false, false) => (19.0, 0.8),
+                            };
+                            let id = egui::Id::new(("lyric-line", i));
+                            let size = ui.ctx().animate_value_with_time(id.with(0), size, 0.25);
+                            let fade = ui.ctx().animate_value_with_time(id.with(1), fade, 0.25);
+                            let found = marks.get(i).map_or(&[][..], Vec::as_slice);
+                            let found = match shown.rhymes {
+                                RhymeShow::All => found,
+                                RhymeShow::Current if here => found,
+                                _ => &[],
+                            };
+                            let color = if here { self.accent } else { style::CREAM_DIM };
+                            let line = lyricview::draw_line(ui, text, found, (size, color, fade), &look)
                                 .on_hover_cursor(egui::CursorIcon::PointingHand);
                             if line.clicked() {
                                 self.action = Some(Action::Seek(*time));

@@ -262,6 +262,8 @@ pub struct Lookup {
     pub scrolled: Option<usize>,
     /// The lyrics being typed or imported, while the editor is open.
     pub editing: Option<String>,
+    /// Rhyme marks for each line of the lyrics in `status`; worked out on first display.
+    pub marks: Option<Vec<Vec<crate::rhyme::Mark>>>,
     /// A `.lrc`/`.txt` file the user is choosing to import.
     pub picking: Option<Receiver<String>>,
 }
@@ -277,6 +279,7 @@ impl Default for Lookup {
             status: Status::Loading,
             scrolled: None,
             editing: None,
+            marks: None,
             picking: None,
         }
     }
@@ -294,10 +297,12 @@ impl Lookup {
             self.status = Status::Loading;
             self.scrolled = None;
             self.editing = None;
+            self.marks = None;
             self.spawn(ctx, track.clone(), dir.to_path_buf(), online);
         }
         while let Ok((path, _, result)) = self.rx.try_recv() {
             if self.track.as_deref() == Some(path.as_path()) {
+                self.marks = None;
                 self.status = match result {
                     Ok(Some(lyrics)) => Status::Found(lyrics),
                     Ok(None) => Status::Missing,

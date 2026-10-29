@@ -1,11 +1,13 @@
 pub mod analysis;
 pub mod download;
 pub mod library;
+pub mod lyricfx;
 pub mod lyrics;
 pub mod media;
 pub mod model;
 pub mod online;
 pub mod player;
 pub mod queue;
+pub mod rhyme;
 pub mod tagparse;
 pub mod tools;
