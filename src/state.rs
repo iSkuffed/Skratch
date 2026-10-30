@@ -58,6 +58,27 @@ impl VizStyle {
     }
 }
 
+/// Where the lyrics go in the full-screen visualizer; the visuals keep to the rest of the screen.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LyricSide {
+    #[default]
+    Top,
+    Left,
+    Right,
+}
+
+impl LyricSide {
+    pub const ALL: [Self; 3] = [Self::Top, Self::Left, Self::Right];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Top => "Top",
+            Self::Left => "Left",
+            Self::Right => "Right",
+        }
+    }
+}
+
 /// The visualizer; the page panel and the full-screen view share these.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -65,6 +86,7 @@ pub struct Visualizer {
     pub style: VizStyle,
     /// Lyrics stay readable over the visualizer.
     pub lyrics: bool,
+    pub lyric_side: LyricSide,
     /// The lyrics panel shows the visualizer behind its message when a track has no lyrics.
     pub fill_when_no_lyrics: bool,
     /// The spinning record sits in the middle of the full-screen view.
@@ -80,6 +102,7 @@ impl Default for Visualizer {
         Self {
             style: VizStyle::Bars,
             lyrics: true,
+            lyric_side: LyricSide::Top,
             fill_when_no_lyrics: true,
             record: true,
             peak_caps: true,
