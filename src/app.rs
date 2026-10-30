@@ -28,6 +28,7 @@ mod fetch;
 mod lyricview;
 mod playing;
 mod setup;
+mod visualizer;
 
 const SEARCH_ID: &str = "library-search";
 
@@ -224,6 +225,10 @@ pub struct Skratch {
     logo: eframe::egui::TextureHandle,
     accent: Color32,
     accent_applied: Color32,
+    /// The page colour last given to egui, which follows the accent when `look.mood` is on.
+    panel_applied: Color32,
+    fonts_applied: bool,
+    grain: egui::TextureHandle,
     spin: f32,
     spin_speed: f32,
     arm: f32,
@@ -242,6 +247,7 @@ pub struct Skratch {
     prev_art: Option<PathBuf>,
     art_changed_at: f64,
     reactive: Reactive,
+    viz: visualizer::Viz,
     lyrics: lyrics::Lookup,
     /// The track the Now playing list was last scrolled to, so it follows track changes.
     listed: Option<i64>,
@@ -253,7 +259,7 @@ impl Skratch {
     pub fn new(cc: &eframe::CreationContext<'_>, data_dir: PathBuf) -> Self {
         let ctx = cc.egui_ctx.clone();
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || ctx.request_repaint());
-        style::apply(&cc.egui_ctx, style::ACCENT);
+        style::apply(&cc.egui_ctx, style::ACCENT, style::PANEL);
         let state_path = data_dir.join("player.json");
         let mut messages = Vec::new();
         let state = match SavedState::load(&state_path) {
@@ -282,6 +288,8 @@ impl Skratch {
             }
         };
         let mut state = state;
+        let fonts_applied = state.look.fonts;
+        style::fonts(&cc.egui_ctx, fonts_applied);
         if state.tag_pattern.trim().is_empty() {
             state.tag_pattern = tagparse::DEFAULT_PATTERN.into();
         }
@@ -342,6 +350,9 @@ impl Skratch {
             logo: style::load_logo(&cc.egui_ctx),
             accent: style::ACCENT,
             accent_applied: style::ACCENT,
+            panel_applied: style::PANEL,
+            fonts_applied,
+            grain: style::grain_texture(&cc.egui_ctx),
             spin: 0.0,
             spin_speed: 0.0,
             arm: 0.0,
@@ -355,12 +366,22 @@ impl Skratch {
             prev_art: None,
             art_changed_at: -10.0,
             reactive: Reactive::default(),
+            viz: Default::default(),
             lyrics: lyrics::Lookup::default(),
             listed: None,
             list_hold: 0.0,
         };
         app.refresh_tools();
         app
+    }
+
+    /// `base` with a hint of the cover's colour, unless the mood tint is off.
+    fn mood(&self, base: Color32, amount: f32) -> Color32 {
+        if self.state.look.mood {
+            style::tint(base, self.accent, amount)
+        } else {
+            base
+        }
     }
 
     fn current(&self) -> Option<&Track> {
@@ -881,7 +902,7 @@ impl Skratch {
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let frame = Frame::side_top_panel(ui.style())
-            .fill(style::SIDEBAR)
+            .fill(self.mood(style::SIDEBAR, 0.05))
             .inner_margin(Margin::same(14));
         egui::SidePanel::left("library-sidebar")
             .default_width(215.0)
@@ -1036,6 +1057,17 @@ impl Skratch {
                             .on_hover_text("Pages fade in, cards rise in, covers crossfade and play/pause morphs.");
                     });
                 });
+                ui.collapsing("Look", |ui| {
+                    let look = &mut self.state.look;
+                    ui.checkbox(&mut look.mood, "Tint with the cover")
+                        .on_hover_text("Panels and the page background take a little of the playing cover's colour.");
+                    ui.checkbox(&mut look.depth, "Shadows and edges")
+                        .on_hover_text("Soft shadows under covers and a light edge on the player bar.");
+                    ui.checkbox(&mut look.grain, "Film grain")
+                        .on_hover_text("A faint noise over everything; it hides banding in dark gradients.");
+                    ui.checkbox(&mut look.fonts, "DM Sans and DM Serif")
+                        .on_hover_text("Off: egui's default typeface.");
+                });
                 if ui.button("Run setup again").clicked() {
                     self.open_setup(false);
                 }
@@ -1116,9 +1148,15 @@ impl Skratch {
         if close(self.accent, target) {
             self.accent = target;
         }
-        if self.accent != self.accent_applied {
-            style::apply(ctx, self.accent);
+        if self.state.look.fonts != self.fonts_applied {
+            self.fonts_applied = self.state.look.fonts;
+            style::fonts(ctx, self.fonts_applied);
+        }
+        let panel = self.mood(style::PANEL, 0.04);
+        if self.accent != self.accent_applied || panel != self.panel_applied {
+            style::apply(ctx, self.accent, panel);
             self.accent_applied = self.accent;
+            self.panel_applied = panel;
             ctx.request_repaint();
         }
         if self.spin_speed > 0.005
@@ -1134,12 +1172,14 @@ impl Skratch {
             .current()
             .map(|t| format!("{}  -  {}", t.title, display(&t.artist, "Unknown artist")))
             .unwrap_or_default();
-        let frame = Frame::new().fill(style::TITLE).corner_radius(CornerRadius {
-            nw: radius,
-            ne: radius,
-            sw: 0,
-            se: 0,
-        });
+        let frame = Frame::new()
+            .fill(self.mood(style::TITLE, 0.05))
+            .corner_radius(CornerRadius {
+                nw: radius,
+                ne: radius,
+                sw: 0,
+                se: 0,
+            });
         egui::TopBottomPanel::top("titlebar")
             .exact_height(44.0)
             .frame(frame)
@@ -1183,7 +1223,7 @@ impl Skratch {
         let (art_mix, old_art, old_glow) = self.crossfade(ui.ctx());
         let progress = (self.state.position / self.duration.max(1.0)).clamp(0.0, 1.0) as f32;
         let frame = Frame::new()
-            .fill(style::BAR)
+            .fill(self.mood(style::BAR, 0.06))
             .inner_margin(Margin::symmetric(18, 10))
             .corner_radius(CornerRadius {
                 nw: 0,
@@ -1191,7 +1231,7 @@ impl Skratch {
                 sw: radius,
                 se: radius,
             });
-        egui::TopBottomPanel::bottom("player")
+        let panel = egui::TopBottomPanel::bottom("player")
             .exact_height(136.0)
             .frame(frame)
             .show_inside(ui, |ui| {
@@ -1409,6 +1449,24 @@ impl Skratch {
                     });
                 });
             });
+        if self.state.look.depth {
+            // a light edge along the top of the bar, and a shadow cast upwards
+            let top = panel.response.rect.top();
+            let width = panel.response.rect.x_range();
+            let p = ui.painter();
+            for i in 0..4 {
+                let rect = egui::Rect::from_x_y_ranges(
+                    width,
+                    top - 4.0 * (i + 1) as f32..=top - 4.0 * i as f32,
+                );
+                p.rect_filled(rect, 0.0, Color32::from_black_alpha(10));
+            }
+            p.hline(
+                width,
+                top + 0.5,
+                egui::Stroke::new(1.0_f32, Color32::from_white_alpha(14)),
+            );
+        }
     }
 
     /// "Select" toggle plus the batch actions, shown above any track list. `ids` are the visible tracks.
@@ -2023,7 +2081,11 @@ impl Skratch {
     fn library_ui(&mut self, ui: &mut egui::Ui) {
         let fade = self.page_fade(ui.ctx());
         self.fade = fade;
+        let wash = (self.state.look.mood).then_some(self.accent);
         let enter = |ui: &mut egui::Ui| {
+            if let Some(accent) = wash {
+                style::wash(ui, accent);
+            }
             ui.set_opacity(fade);
             ui.add_space(6.0 * (1.0 - fade));
         };
@@ -2112,6 +2174,7 @@ impl Skratch {
                     let columns = ((ui.available_width() / 180.0) as usize).max(1);
                     let since = ui.input(|i| i.time) - self.shown_at;
                     let stagger = self.state.effects.transitions();
+                    let depth = self.state.look.depth;
                     let rows = self.groups.len().div_ceil(columns);
                     egui::ScrollArea::vertical().id_salt("group-grid").show_rows(ui, 230.0, rows, |ui, range| {
                         for row in range {
@@ -2131,6 +2194,9 @@ impl Skratch {
                                         let seed = format!("{}{}", group.name, group.subtitle);
                                         let origin = ui.cursor().min;
                                         let sleeve = egui::Rect::from_min_size(origin, egui::vec2(SIZE, SIZE));
+                                        if depth {
+                                            style::shadow(ui.painter(), sleeve, 6.0);
+                                        }
                                         let peek = ui.ctx().animate_bool_with_time(ui.id().with(("peek", index)), ui.rect_contains_pointer(sleeve), 0.18);
                                         if peek > 0.01 {
                                             // the record slides out of the sleeve on hover
@@ -2625,9 +2691,13 @@ impl eframe::App for Skratch {
         let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         let radius = if maximized { 0 } else { style::RADIUS };
         let root = Frame::new()
-            .fill(style::BG)
+            .fill(self.mood(style::BG, 0.04))
             .corner_radius(CornerRadius::same(radius));
         egui::CentralPanel::default().frame(root).show(ctx, |ui| {
+            if self.viz.full {
+                self.viz_screen(ui);
+                return;
+            }
             let outline = ui.max_rect();
             self.title_bar(ui, radius);
             if !self.messages.is_empty() {
@@ -2643,6 +2713,11 @@ impl eframe::App for Skratch {
             self.player_bar(ui, radius);
             self.sidebar(ui);
             self.library_ui(ui);
+            if self.state.look.grain {
+                // inside the rounded corners, which are see-through
+                let inset = if maximized { 0.0 } else { 4.0 };
+                style::grain(ui.painter(), outline.shrink(inset), &self.grain);
+            }
             if !maximized {
                 ui.painter().rect_stroke(
                     outline,

@@ -1,5 +1,6 @@
 //! Skratch's look: warm near-black, cream text, one accent that follows the playing cover.
-//! Everything is painted with egui primitives, so there are no bundled assets.
+//! Everything is painted with egui primitives; the only bundled assets are the logo and two
+//! typefaces (DM Sans and DM Serif Display, SIL Open Font Licence in `assets/fonts`).
 use eframe::egui::{
     self, Align2, Color32, ColorImage, Context, CornerRadius, CursorIcon, FontId, Mesh, Painter,
     PointerButton, Pos2, Rect, Response, Sense, Shape, Stroke, TextureId, Ui, Vec2,
@@ -37,11 +38,161 @@ pub fn load_logo(ctx: &Context) -> egui::TextureHandle {
     ctx.load_texture("logo", image, egui::TextureOptions::LINEAR)
 }
 
-pub fn apply(ctx: &Context, accent: Color32) {
+/// The heading typeface: DM Serif Display, or the normal one when custom fonts are off.
+pub fn display(size: f32) -> FontId {
+    FontId::new(size, egui::FontFamily::Name("display".into()))
+}
+
+/// A font on this system that covers Japanese, Korean and Chinese, which the bundled faces
+/// and egui's own lack; titles in those scripts would show as empty boxes without it.
+fn cjk_fallback() -> Option<egui::FontData> {
+    let found = std::process::Command::new("fc-match")
+        .args(["-f", "%{file}|%{index}", "sans-serif:lang=ja"])
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .and_then(|text| {
+            let (file, index) = text.split_once('|')?;
+            // the high 16 bits pick a named instance of a variable font; the face is the low ones
+            let index: u32 = index.trim().parse().unwrap_or(0);
+            Some((file.to_string(), index & 0xffff))
+        });
+    let (file, index) = found.or_else(|| {
+        [
+            "/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "C:\\Windows\\Fonts\\YuGothR.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        ]
+        .iter()
+        .find(|path| std::path::Path::new(path).exists())
+        .map(|path| (path.to_string(), 0))
+    })?;
+    let bytes = std::fs::read(file).ok()?;
+    // a font egui cannot read would stop the app at startup, so check it first
+    ab_glyph::FontRef::try_from_slice_and_index(&bytes, index).ok()?;
+    let mut data = egui::FontData::from_owned(bytes);
+    data.index = index;
+    Some(data)
+}
+
+/// Installs the typefaces. `custom` puts DM Sans (body) and DM Serif Display (headings) first;
+/// either way a system CJK font is added as a last resort.
+pub fn fonts(ctx: &Context, custom: bool) {
+    use egui::FontFamily::{Monospace, Name, Proportional};
+    let mut fonts = egui::FontDefinitions::default();
+    let mut display = fonts.families[&Proportional].clone();
+    if custom {
+        fonts.font_data.insert(
+            "dm-sans".into(),
+            egui::FontData::from_static(include_bytes!("../assets/fonts/DMSans.ttf")).into(),
+        );
+        fonts.font_data.insert(
+            "dm-serif".into(),
+            egui::FontData::from_static(include_bytes!(
+                "../assets/fonts/DMSerifDisplay-Regular.ttf"
+            ))
+            .into(),
+        );
+        if let Some(body) = fonts.families.get_mut(&Proportional) {
+            body.insert(0, "dm-sans".into());
+        }
+        display = fonts.families[&Proportional].clone();
+        display.insert(0, "dm-serif".into());
+    }
+    fonts.families.insert(Name("display".into()), display);
+    if let Some(data) = cjk_fallback() {
+        fonts.font_data.insert("cjk".into(), data.into());
+        for family in [Proportional, Monospace, Name("display".into())] {
+            if let Some(list) = fonts.families.get_mut(&family) {
+                list.push("cjk".into());
+            }
+        }
+    }
+    ctx.set_fonts(fonts);
+}
+
+/// `base` with a little of `accent` mixed in, so panels drift towards the cover's colour.
+pub fn tint(base: Color32, accent: Color32, amount: f32) -> Color32 {
+    base.lerp_to_gamma(accent, amount)
+}
+
+/// A soft wash of `accent` fading out downwards from the top of `ui`'s area.
+pub fn wash(ui: &Ui, accent: Color32) {
+    let area = ui.max_rect();
+    let bottom = area.top() + 280.0;
+    let mut mesh = egui::Mesh::default();
+    for (y, alpha) in [(area.top(), 0.10), (bottom, 0.0)] {
+        for x in [area.left(), area.right()] {
+            mesh.colored_vertex(Pos2::new(x, y), accent.gamma_multiply(alpha));
+        }
+    }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(1, 2, 3);
+    ui.painter().add(egui::Shape::mesh(mesh));
+}
+
+/// A soft shadow under `rect`, drawn before whatever sits on it.
+pub fn shadow(p: &Painter, rect: Rect, radius: f32) {
+    for i in 1..=5 {
+        let grow = i as f32 * 2.2;
+        p.rect_filled(
+            rect.expand(grow)
+                .translate(Vec2::new(0.0, 2.0 + grow * 0.6)),
+            radius + grow,
+            Color32::from_black_alpha(14),
+        );
+    }
+}
+
+/// A round shadow under a record.
+pub fn shadow_disc(p: &Painter, c: Pos2, r: f32) {
+    for i in 1..=5 {
+        let grow = i as f32 * 0.04 * r;
+        p.circle_filled(
+            c + Vec2::new(0.0, r * 0.05 + grow * 0.5),
+            r + grow,
+            Color32::from_black_alpha(16),
+        );
+    }
+}
+
+/// Film grain: a small noise tile that repeats. Drawn at about 3% it hides the banding that
+/// dark gradients show on 8-bit displays.
+pub fn grain_texture(ctx: &Context) -> egui::TextureHandle {
+    const SIDE: usize = 128;
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let pixels: Vec<u8> = (0..SIDE * SIDE)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            if seed & 0x100 == 0 { 0 } else { 255 }
+        })
+        .collect();
+    let image = ColorImage::from_gray([SIDE, SIDE], &pixels);
+    let options = egui::TextureOptions {
+        magnification: egui::TextureFilter::Nearest,
+        minification: egui::TextureFilter::Nearest,
+        wrap_mode: egui::TextureWrapMode::Repeat,
+        mipmap_mode: None,
+    };
+    ctx.load_texture("grain", image, options)
+}
+
+pub fn grain(p: &Painter, rect: Rect, texture: &egui::TextureHandle) {
+    let mut mesh = egui::Mesh::with_texture(texture.id());
+    let uv = Rect::from_min_size(Pos2::ZERO, rect.size() / texture.size_vec2());
+    mesh.add_rect_with_uv(rect, uv, Color32::from_white_alpha(7));
+    p.add(egui::Shape::mesh(mesh));
+}
+
+pub fn apply(ctx: &Context, accent: Color32, panel: Color32) {
     let mut style = (*ctx.style()).clone();
     let v = &mut style.visuals;
     *v = egui::Visuals::dark();
-    v.panel_fill = PANEL;
+    v.panel_fill = panel;
     v.window_fill = PANEL;
     v.window_stroke = stroke(1.0, EDGE);
     v.window_corner_radius = CornerRadius::same(10);
@@ -73,7 +224,7 @@ pub fn apply(ctx: &Context, accent: Color32) {
     style.spacing.item_spacing = egui::vec2(8.0, 7.0);
     style
         .text_styles
-        .insert(egui::TextStyle::Heading, FontId::proportional(26.0));
+        .insert(egui::TextStyle::Heading, display(26.0));
     ctx.set_style(style);
 }
 
@@ -499,7 +650,7 @@ pub fn groove_seek(
 }
 
 fn wordmark(p: &Painter, left_center: Pos2, accent: Color32) {
-    let galley = p.layout_no_wrap("SKRATCH".into(), FontId::proportional(21.0), accent);
+    let galley = p.layout_no_wrap("SKRATCH".into(), display(22.0), accent);
     let rect = Align2::LEFT_CENTER.anchor_size(left_center, galley.size());
     for dx in [0.0, 0.6, 1.2] {
         p.galley(rect.min + Vec2::new(dx, 0.0), galley.clone(), accent);

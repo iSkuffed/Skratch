@@ -11,10 +11,17 @@ pub enum NowPanel {
     Lyrics,
     UpNext,
     Library,
+    Visualizer,
 }
 
 impl NowPanel {
-    pub const ALL: [Self; 4] = [Self::Details, Self::Lyrics, Self::UpNext, Self::Library];
+    pub const ALL: [Self; 5] = [
+        Self::Details,
+        Self::Lyrics,
+        Self::Visualizer,
+        Self::UpNext,
+        Self::Library,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -22,6 +29,86 @@ impl NowPanel {
             Self::Lyrics => "Lyrics",
             Self::UpNext => "Up next",
             Self::Library => "Library",
+            Self::Visualizer => "Visualizer",
+        }
+    }
+}
+
+/// How the spectrum is drawn.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VizStyle {
+    /// Classic equalizer columns with falling peak caps and a reflection.
+    #[default]
+    Bars,
+    /// Bars growing both ways from a centre line.
+    Mirror,
+    /// Bars radiating from a circle.
+    Ring,
+}
+
+impl VizStyle {
+    pub const ALL: [Self; 3] = [Self::Bars, Self::Mirror, Self::Ring];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Bars => "Bars",
+            Self::Mirror => "Mirror",
+            Self::Ring => "Ring",
+        }
+    }
+}
+
+/// The visualizer; the page panel and the full-screen view share these.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Visualizer {
+    pub style: VizStyle,
+    /// Lyrics stay readable over the visualizer.
+    pub lyrics: bool,
+    /// The lyrics panel shows the visualizer behind its message when a track has no lyrics.
+    pub fill_when_no_lyrics: bool,
+    /// The spinning record sits in the middle of the full-screen view.
+    pub record: bool,
+    /// Bright caps that hang above the bars and fall.
+    pub peak_caps: bool,
+    /// A faded copy of the bars below them.
+    pub reflection: bool,
+}
+
+impl Default for Visualizer {
+    fn default() -> Self {
+        Self {
+            style: VizStyle::Bars,
+            lyrics: true,
+            fill_when_no_lyrics: true,
+            record: true,
+            peak_caps: true,
+            reflection: true,
+        }
+    }
+}
+
+/// How the interface is dressed; every part can be switched off.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Look {
+    /// The panels take a little of the cover's colour.
+    pub mood: bool,
+    /// Shadows under covers and a light edge on the player bar.
+    pub depth: bool,
+    /// A faint film grain over everything, which also hides banding in dark gradients.
+    pub grain: bool,
+    /// The bundled typefaces instead of egui's defaults.
+    pub fonts: bool,
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self {
+            mood: true,
+            depth: true,
+            grain: true,
+            fonts: true,
         }
     }
 }
@@ -51,6 +138,8 @@ pub struct LyricStyle {
     /// Let effects move (rainbow, wave, shake); off holds them still.
     pub animate: bool,
     pub rhymes: RhymeShow,
+    /// The line being sung fills with the accent colour as it goes.
+    pub sweep: bool,
 }
 
 impl Default for LyricStyle {
@@ -62,6 +151,7 @@ impl Default for LyricStyle {
             effects_live_only: true,
             animate: true,
             rhymes: RhymeShow::All,
+            sweep: true,
         }
     }
 }
@@ -152,6 +242,8 @@ pub struct SavedState {
     pub lyrics_online: bool,
     pub lyric_style: LyricStyle,
     pub effects: Effects,
+    pub visualizer: Visualizer,
+    pub look: Look,
 }
 
 impl SavedState {

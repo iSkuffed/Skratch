@@ -53,6 +53,8 @@ pub fn rhyme_marks(lines: &[String]) -> Vec<Vec<Mark>> {
 
 struct Piece {
     galley: Arc<egui::Galley>,
+    /// Coloured as a rhyme, so the sweep leaves its colour alone.
+    rhymed: bool,
     at: Vec2,
     /// Effects and the char's position in the line, for the moving ones.
     fx: u8,
@@ -65,6 +67,39 @@ struct Look1 {
     size: f32,
     color: Color32,
     italic: bool,
+    rhymed: bool,
+}
+
+/// Rough number of syllables in `word` (vowel groups, minus a silent final e), at least 1.
+fn syllables(word: &str) -> f32 {
+    let lower = word.to_lowercase();
+    let mut count = 0;
+    let mut in_vowel = false;
+    for c in lower.chars() {
+        let vowel = "aeiouy".contains(c);
+        if vowel && !in_vowel {
+            count += 1;
+        }
+        in_vowel = vowel;
+    }
+    if count > 1
+        && lower
+            .trim_end_matches(|c: char| !c.is_alphabetic())
+            .ends_with('e')
+    {
+        count -= 1;
+    }
+    count.max(1) as f32
+}
+
+/// How long a line takes to sing, in syllables, for pacing the sweep.
+pub fn line_syllables(text: &str) -> f32 {
+    lyricfx::parse(text)
+        .plain()
+        .split_whitespace()
+        .map(syllables)
+        .sum::<f32>()
+        .max(1.0)
 }
 
 /// The most a line is scaled up; lines wrap early enough for the scaled text to still fit.
@@ -83,6 +118,8 @@ pub struct Spec {
     pub effects: bool,
     /// How strongly rhyme colours show, 0 (plain text) to 1.
     pub rhyme: f32,
+    /// How far through the line the singer is (0 to 1) and the colour of the part already sung.
+    pub sweep: Option<(f32, Color32)>,
 }
 
 /// Draws `text` (markup included) wrapped to the available width. `marks` are the rhyme groups
@@ -151,6 +188,7 @@ pub fn draw_line(
             lyricfx::NO_RHYME => None,
             n => Some(usize::from(n) - 1),
         };
+        let rhymed = set.is_some() && rhyme > 0.0;
         if let Some(g) = set
             && rhyme > 0.0
         {
@@ -164,6 +202,7 @@ pub fn draw_line(
             size,
             color,
             italic: fx & ITALIC != 0 || adlib[i],
+            rhymed,
         }
     };
 
@@ -214,14 +253,19 @@ pub fn draw_line(
         let moving = fxs.iter().any(|fx| fx & (WAVE | SHAKE) != 0);
         any_moving |= fxs.iter().any(|fx| fx & MOVING != 0);
         let uniform = looks.windows(2).all(|w| w[0] == w[1]);
-        let mut parts: Vec<(Arc<egui::Galley>, u8, usize)> = Vec::new();
+        let mut parts: Vec<(Arc<egui::Galley>, u8, usize, bool)> = Vec::new();
         if uniform && !moving {
             let text: String = parsed.chars[word.clone()].iter().collect();
-            parts.push((layout(text, looks[0]), fxs[0], word.start));
+            parts.push((layout(text, looks[0]), fxs[0], word.start, looks[0].rhymed));
         } else {
             // one glyph at a time, so each can have its own colour and movement
             for (n, i) in word.clone().enumerate() {
-                parts.push((layout(parsed.chars[i].to_string(), looks[n]), fxs[n], i));
+                parts.push((
+                    layout(parsed.chars[i].to_string(), looks[n]),
+                    fxs[n],
+                    i,
+                    looks[n].rhymed,
+                ));
             }
         }
         let word_w: f32 = parts.iter().map(|(g, ..)| g.size().x).sum();
@@ -241,10 +285,11 @@ pub fn draw_line(
             y += row_h;
             row_h = 0.0;
         }
-        for (galley, fx, index) in parts {
+        for (galley, fx, index, rhymed) in parts {
             row_h = row_h.max(galley.size().y);
             let size = galley.size().y;
             pieces.push(Piece {
+                rhymed,
                 at: Vec2::new(x, y),
                 fx,
                 index,
@@ -263,7 +308,26 @@ pub fn draw_line(
     let time = look.time as f32;
     let mut painter = ui.painter().clone();
     painter.multiply_opacity(fade);
-    for piece in &pieces {
+    // the sweep: each piece gets a share of the line in proportion to its syllables
+    let weights: Vec<f32> = pieces
+        .iter()
+        .map(|p| {
+            let text = p.galley.text();
+            let letters = text.chars().filter(|c| c.is_alphabetic()).count();
+            match letters {
+                0 => 0.05,
+                1 => 0.35,
+                _ => syllables(text),
+            }
+        })
+        .collect();
+    let total: f32 = weights.iter().sum::<f32>().max(0.01);
+    let mut before = 0.0;
+    let grow = (spec.scale != 1.0).then(|| {
+        let pivot = Pos2::new(rect.left(), rect.center().y).to_vec2();
+        egui::emath::TSTransform::new(pivot - spec.scale * pivot, spec.scale)
+    });
+    for (piece, weight) in pieces.iter().zip(&weights) {
         let mut at: Pos2 = rect.min + piece.at;
         if animate {
             if piece.fx & WAVE != 0 {
@@ -277,12 +341,32 @@ pub fn draw_line(
             }
         }
         let mut shape = egui::Shape::galley(at, piece.galley.clone(), Color32::WHITE);
-        if spec.scale != 1.0 {
-            let pivot = Pos2::new(rect.left(), rect.center().y).to_vec2();
-            let grow = egui::emath::TSTransform::new(pivot - spec.scale * pivot, spec.scale);
+        if let Some(grow) = grow {
             shape.transform(grow);
         }
         painter.add(shape);
+        // the sung part of this piece, drawn again in its own colour and clipped at the sweep
+        if let Some((progress, sung)) = spec.sweep.filter(|_| !piece.rhymed) {
+            let done = ((progress * total - before) / weight).clamp(0.0, 1.0);
+            if done > 0.0 {
+                let size = piece.galley.size();
+                let mut clip = egui::Rect::from_min_size(at, Vec2::new(size.x * done, size.y));
+                let mut shape = egui::epaint::TextShape::new(at, piece.galley.clone(), sung);
+                shape.override_text_color = Some(sung);
+                let mut shape = egui::Shape::Text(shape);
+                if let Some(grow) = grow {
+                    shape.transform(grow);
+                    clip = grow.mul_rect(clip);
+                }
+                painter
+                    .with_clip_rect(clip.intersect(painter.clip_rect()))
+                    .add(shape);
+            }
+        }
+        before += weight;
+    }
+    if spec.sweep.is_some() && ui.is_rect_visible(rect) {
+        ui.ctx().request_repaint();
     }
     if animate && any_moving && ui.is_rect_visible(rect) {
         ui.ctx().request_repaint_after(Duration::from_millis(33));

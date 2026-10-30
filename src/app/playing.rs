@@ -16,6 +16,9 @@ use skratch::{
 impl Skratch {
     pub(super) fn playing_ui(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show_inside(ui, |ui| {
+            if self.state.look.mood {
+                style::wash(ui, self.accent);
+            }
             ui.set_opacity(self.fade);
             let Some(track) = self.current().cloned() else {
                 ui.add_space(24.0);
@@ -86,6 +89,9 @@ impl Skratch {
             if response.clicked() {
                 self.action = Some(Action::Pause);
             }
+            if self.state.look.depth {
+                style::shadow_disc(ui.painter(), centre, r);
+            }
             style::record_fading(
                 ui.painter(),
                 centre,
@@ -125,6 +131,7 @@ impl Skratch {
                 NowPanel::Lyrics => "LYRICS",
                 NowPanel::UpNext => "UP NEXT",
                 NowPanel::Library => "LIBRARY",
+                NowPanel::Visualizer => "VISUALIZER",
             };
             ui.label(
                 RichText::new(heading)
@@ -146,6 +153,14 @@ impl Skratch {
                             }
                         }
                     });
+                if panel == NowPanel::Visualizer {
+                    let config = egui::containers::menu::MenuConfig::new()
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+                    egui::containers::menu::MenuButton::new("...")
+                        .config(config)
+                        .ui(ui, |ui| self.viz_menu(ui, false));
+                    self.viz_full_button(ui);
+                }
                 if panel == NowPanel::Lyrics {
                     // stays open while display options are ticked; the actions close it themselves
                     let config = egui::containers::menu::MenuConfig::new()
@@ -157,9 +172,35 @@ impl Skratch {
             });
         });
         ui.add_space(4.0);
+        let area = ui.available_rect_before_wrap();
         match panel {
             NowPanel::Details => self.details(ui, track),
-            NowPanel::Lyrics => self.lyrics(ui, track),
+            NowPanel::Lyrics => {
+                // a track without lyrics gets the visualizer behind the "no lyrics" message
+                let dir = self.data_dir.join("lyrics");
+                self.lyrics
+                    .update(ui.ctx(), track, &dir, self.state.lyrics_online);
+                let none = matches!(self.lyrics.status, Status::Missing | Status::Failed(_));
+                if none
+                    && self.lyrics.editing.is_none()
+                    && self.state.visualizer.fill_when_no_lyrics
+                {
+                    self.viz_panel(ui, area, 0.28);
+                }
+                self.lyrics(ui, track);
+            }
+            NowPanel::Visualizer => {
+                let dir = self.data_dir.join("lyrics");
+                self.lyrics
+                    .update(ui.ctx(), track, &dir, self.state.lyrics_online);
+                let over = self.state.visualizer.lyrics
+                    && matches!(self.lyrics.status, Status::Found(_))
+                    && self.lyrics.editing.is_none();
+                self.viz_panel(ui, area, if over { 0.3 } else { 1.0 });
+                if over {
+                    self.lyrics(ui, track);
+                }
+            }
             _ => self.panel_list(ui, panel),
         }
     }
@@ -168,7 +209,7 @@ impl Skratch {
         ui.add_space(((ui.available_height() - 150.0) / 2.0).max(0.0));
         ui.label(
             RichText::new(&track.title)
-                .size(36.0)
+                .font(style::display(36.0))
                 .strong()
                 .color(style::CREAM),
         );
@@ -239,6 +280,7 @@ impl Skratch {
             "Effects only on the line being sung",
         );
         ui.checkbox(&mut style.animate, "Animate effects");
+        ui.checkbox(&mut style.sweep, "Fill the sung line as it goes");
         ui.horizontal(|ui| {
             ui.label("Rhymes");
             for (shown, name) in [
@@ -462,6 +504,7 @@ impl Skratch {
                                 } else {
                                     1.0
                                 },
+                                sweep: None,
                             };
                             lyricview::draw_line(ui, line, found, &spec, &look);
                         }
@@ -509,13 +552,27 @@ impl Skratch {
                                 RhymeShow::Off => false,
                             };
                             let found = if show { found } else { &[] };
+                            // the sung line fills with the accent colour as its time runs out
+                            let sweep = (here && shown.sweep && self.playing).then(|| {
+                                let words = lyricview::line_syllables(text);
+                                let next = lines.get(i + 1).map_or(*time + 5.0, |l| l.0);
+                                let span = (next - time).clamp(0.5, 0.45 * f64::from(words) + 0.6);
+                                (((now - time) / span).clamp(0.0, 1.0) as f32, self.accent)
+                            });
                             let spec = lyricview::Spec {
                                 size: 20.0,
                                 scale,
-                                color: if here { self.accent } else { style::CREAM_DIM },
+                                color: if sweep.is_some() {
+                                    style::CREAM
+                                } else if here {
+                                    self.accent
+                                } else {
+                                    style::CREAM_DIM
+                                },
                                 fade,
                                 effects: here || !shown.effects_live_only,
                                 rhyme: if show { rhyme } else { 0.0 },
+                                sweep,
                             };
                             let line = lyricview::draw_line(ui, text, found, &spec, &look)
                                 .on_hover_cursor(egui::CursorIcon::PointingHand);

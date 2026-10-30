@@ -8,6 +8,7 @@ description = "A small, local-first Linux music library and player"
 [dependencies]
 anyhow = "1"
 directories = "6"
+ab_glyph = "0.2"
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "accesskit"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 lofty = "0.22"
