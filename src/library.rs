@@ -3,9 +3,9 @@ use anyhow::{Context, Result, bail, ensure};
 use image::ImageFormat;
 use lofty::{
     config::WriteOptions,
-    file::{AudioFile, TaggedFileExt},
+    file::{AudioFile, TaggedFile, TaggedFileExt},
     picture::{Picture, PictureType},
-    tag::{Accessor, ItemKey, Tag},
+    tag::{Accessor, ItemKey, Tag, TagType},
 };
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use std::{
@@ -519,7 +519,7 @@ impl Library {
 
         let mut tagged_file = lofty::read_from_path(temporary.path())
             .context("this audio format cannot be edited by Lofty")?;
-        let tag_type = tagged_file.primary_tag_type();
+        let tag_type = avoid_id3v1(&mut tagged_file);
         ensure!(
             tagged_file.supports_tag_type(tag_type),
             "this audio format does not support tag editing"
@@ -645,6 +645,20 @@ impl Library {
     }
 }
 
+/// Picks the tag to edit in a freshly read file. ID3v1 is skipped: it cannot hold a cover, and
+/// lofty's ID3v1 writer panics when a 30-byte field ends inside a multi-byte character. An ID3v1
+/// tag that is all the file has is copied into a new ID3v2 tag; the old footer is left on disk.
+fn avoid_id3v1(file: &mut TaggedFile) -> TagType {
+    let Some(mut old) = file.remove(TagType::Id3v1) else {
+        return file.primary_tag_type();
+    };
+    if file.primary_tag().is_none() {
+        old.re_map(TagType::Id3v2);
+        file.insert_tag(old);
+    }
+    file.primary_tag_type()
+}
+
 /// Writes `image` as the front cover of `path` through a temporary copy, so a failed write
 /// cannot damage the original.
 fn embed_cover(path: &Path, image: &[u8]) -> Result<()> {
@@ -670,7 +684,7 @@ fn embed_cover(path: &Path, image: &[u8]) -> Result<()> {
 
     let mut tagged_file = lofty::read_from_path(temporary.path())
         .context("this audio format cannot be edited by Lofty")?;
-    let tag_type = tagged_file.primary_tag_type();
+    let tag_type = avoid_id3v1(&mut tagged_file);
     ensure!(
         tagged_file.supports_tag_type(tag_type),
         "this audio format does not support tag editing"

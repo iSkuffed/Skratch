@@ -422,3 +422,34 @@ fn embedding_a_cover_writes_it_into_the_file_and_keeps_the_tags() {
             .starts_with(".skratch-edit-")
     }));
 }
+
+#[test]
+fn a_cover_can_be_embedded_into_an_mp3_that_only_has_id3v1_tags() {
+    if Command::new("ffmpeg").arg("-version").output().is_err() {
+        eprintln!("skipping ID3v1 cover embed: ffmpeg is unavailable");
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let music = temp.path().join("music");
+    fs::create_dir_all(&music).unwrap();
+    // the accent straddles byte 30, where an ID3v1 field gets cut
+    let title = format!("{}é tail", "x".repeat(29));
+    let status = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi"])
+        .args(["-i", "anullsrc=r=8000:cl=mono", "-t", "0.2"])
+        .args(["-metadata", &format!("title={title}")])
+        .args(["-write_id3v2", "0", "-write_id3v1", "1", "-y"])
+        .arg(music.join("old.mp3"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut library = Library::open(&temp.path().join("data")).unwrap();
+    library.add_source(&music).unwrap();
+    library.scan(false).unwrap();
+    let track = library.tracks().unwrap().remove(0);
+    library
+        .set_cover(track.id, &cover_png([40, 90, 200]), true)
+        .unwrap();
+    let tagged = read_from_path(&track.path).unwrap();
+    assert_eq!(tagged.primary_tag().unwrap().pictures().len(), 1);
+}
