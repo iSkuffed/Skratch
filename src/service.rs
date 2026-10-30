@@ -4,6 +4,8 @@ use skratch::{
     model::{MetadataEdit, Track},
 };
 use std::{
+    any::Any,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     sync::{
         Arc,
@@ -31,6 +33,15 @@ pub enum Event {
     Message(String),
     Edited(i64),
     EditFailed(i64, String),
+}
+
+fn panicked(panic: Box<dyn Any + Send>) -> anyhow::Error {
+    let text = panic
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    anyhow::anyhow!("internal error ({text}); this file was skipped")
 }
 
 pub struct Service {
@@ -94,7 +105,9 @@ impl Service {
             loop {
                 if rescan {
                     send(Event::Busy(true));
-                    match library.scan(force) {
+                    match catch_unwind(AssertUnwindSafe(|| library.scan(force)))
+                        .unwrap_or_else(|panic| Err(panicked(panic)))
+                    {
                         Ok(report) => {
                             if !report.warnings.is_empty() {
                                 send(Event::Message(report.warnings.join("\n")));
@@ -134,7 +147,9 @@ impl Service {
                 }
                 match rx.recv_timeout(Duration::from_millis(250)) {
                     Ok(command) => {
-                        let result = match command {
+                        // A panic inside a command (a tag or image library choking on one
+                        // odd file) must not kill the worker for the rest of the session.
+                        let result = catch_unwind(AssertUnwindSafe(|| match command {
                             Command::Refresh => {
                                 force = true;
                                 Ok(())
@@ -185,7 +200,8 @@ impl Service {
                                 send(Event::Message(message));
                                 Ok(())
                             }
-                        };
+                        }))
+                        .unwrap_or_else(|panic| Err(panicked(panic)));
                         if let Err(e) = result {
                             send(Event::Message(format!("{e:#}")));
                         }
