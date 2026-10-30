@@ -176,6 +176,14 @@ fn resolve(w: &str, guess: bool) -> Option<(String, bool)> {
     {
         hit = find(b);
     }
+    // a plural the dictionary lacks: the singular's sound plus a final Z
+    if hit.is_none()
+        && let Some(b) = w
+            .strip_suffix('s')
+            .filter(|b| b.len() > 3 && !b.ends_with('s'))
+    {
+        hit = find(b).map(|t| format!("{t} Z"));
+    }
     match hit {
         Some(mut t) => {
             // "-ing" and dropped-g "-in'" should rhyme with each other.
@@ -230,6 +238,24 @@ fn near_tail(a: &str, b: &str) -> bool {
     let (va, ra) = a.split_once(' ').unwrap_or((a, ""));
     let (vb, rb) = b.split_once(' ').unwrap_or((b, ""));
     ra == rb && matches!((va, vb), ("AA", "AE" | "AO") | ("AE" | "AO", "AA"))
+}
+
+fn syllables(tail: &str) -> usize {
+    tail.split(' ').filter(|p| VOWELS.contains(p)).count()
+}
+
+/// Key for long rhymes like criminal / general / subliminals: three or more syllables from the
+/// stress on, the same last syllable, and a short stressed vowel (i, e, a). A plural s is ignored.
+/// What sits between them (crim-i-nal, gen-er-al) is not compared, as in a rapped run of syllables.
+fn long_key(tail: &str) -> Option<String> {
+    let mut ph: Vec<&str> = tail.split(' ').collect();
+    if ph.len() > 2 && matches!(ph.last(), Some(&("Z" | "S"))) {
+        ph.pop();
+    }
+    if syllables(&ph.join(" ")) < 3 || !matches!(ph[0], "IH" | "EH" | "AE") {
+        return None;
+    }
+    Some(ph[ph.len() - 2..].join(" "))
 }
 
 /// Weak class for words with an unstressed ending: the final unstressed vowel
@@ -301,7 +327,10 @@ fn linkable(level: usize, a: &Cand, b: &Cand) -> bool {
             d <= window
                 && a.exact
                 && b.exact
-                && (slant_key(&a.tail) == slant_key(&b.tail) || near_tail(&a.tail, &b.tail))
+                && (slant_key(&a.tail) == slant_key(&b.tail)
+                    && syllables(&a.tail) == syllables(&b.tail)
+                    || near_tail(&a.tail, &b.tail)
+                    || long_key(&a.tail).is_some_and(|k| Some(k) == long_key(&b.tail)))
         }
         _ => both_end && d <= 2 && a.weak.is_some() && a.weak == b.weak,
     }
@@ -644,6 +673,24 @@ mod tests {
             m.iter().all(|x| x.len() == 1) && m[0][0].group == m[1][0].group,
             "{m:?}"
         );
+    }
+
+    #[test]
+    fn long_rhymes_match_on_the_last_syllable_and_the_short_vowel() {
+        let lines = [
+            "I'm a criminal, turned to a general",
+            "Don't do subliminals, uh, uh",
+        ];
+        let marks = mark_verse(&lines);
+        let found: Vec<Vec<&str>> = lines
+            .iter()
+            .zip(&marks)
+            .map(|(l, m)| m.iter().map(|m| &l[m.start..m.end]).collect())
+            .collect();
+        assert_eq!(found, [vec!["criminal", "general"], vec!["subliminals"]]);
+        // a long word with another vowel or ending does not join
+        assert!(none(&["a criminal", "a hospital"]));
+        assert!(none(&["a criminal", "a terminal"]));
     }
 
     #[test]

@@ -23,9 +23,6 @@ EXTRA = {
 }
 
 
-MIN_UNIQUE_LEN = 8
-
-
 def b36(n):
     s = ""
     while True:
@@ -66,9 +63,7 @@ def main(src, dst):
         words.setdefault(w, p.split())
     from collections import Counter
     tl = {w: tail(p) for w, p in words.items()}
-    count = Counter(t for t in tl.values() if t)
-    # Size budget: drop long words whose tail nothing else shares (rare names, jargon).
-    kept = [(w, t) for w, t in tl.items() if t and (count[t] > 1 or len(w) < MIN_UNIQUE_LEN)]
+    kept = [(w, t) for w, t in tl.items() if t]
     # Most common tails get the shortest codes.
     freq = Counter(t for _, t in kept)
     tails = {t: i for i, (t, _) in enumerate(freq.most_common())}
