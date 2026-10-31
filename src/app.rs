@@ -32,6 +32,21 @@ mod visualizer;
 
 const SEARCH_ID: &str = "library-search";
 
+/// Whether the track's title, artist, album, genre or file path contains `query` (lowercase).
+fn matches_query(track: &Track, query: &str) -> bool {
+    query.is_empty()
+        || [
+            &track.title,
+            &track.artist,
+            &track.album,
+            &track.album_artist,
+            &track.genre,
+        ]
+        .iter()
+        .any(|s| s.to_lowercase().contains(query))
+        || track.path.to_string_lossy().to_lowercase().contains(query)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
     Tracks,
@@ -253,6 +268,14 @@ pub struct Skratch {
     listed: Option<i64>,
     /// Until this time (egui seconds) a track change counts as caused by a click in that list.
     list_hold: f64,
+    /// What the Up next search box holds (the Library tab shares `search`).
+    queue_search: String,
+    /// The Now playing view last drawn and when it appeared, for the fade-in between views.
+    panel_shown: Option<NowPanel>,
+    panel_shown_at: f64,
+    /// How far that fade has got this frame (0 to 1).
+    tab_fade: f32,
+    drawer: playing::Drawer,
 }
 
 impl Skratch {
@@ -370,6 +393,11 @@ impl Skratch {
             lyrics: lyrics::Lookup::default(),
             listed: None,
             list_hold: 0.0,
+            queue_search: String::new(),
+            panel_shown: None,
+            panel_shown_at: 0.0,
+            tab_fade: 1.0,
+            drawer: Default::default(),
         };
         app.refresh_tools();
         app
@@ -474,13 +502,7 @@ impl Skratch {
             .tracks
             .iter()
             .enumerate()
-            .filter(|(_, t)| {
-                query.is_empty()
-                    || [&t.title, &t.artist, &t.album, &t.album_artist, &t.genre]
-                        .iter()
-                        .any(|s| s.to_lowercase().contains(&query))
-                    || t.path.to_string_lossy().to_lowercase().contains(&query)
-            })
+            .filter(|(_, t)| matches_query(t, &query))
             .map(|(i, _)| i)
             .collect();
         let mut filtered = std::mem::take(&mut self.filtered);
@@ -1063,7 +1085,7 @@ impl Skratch {
                         ui.checkbox(&mut effects.seek_life, "Lively seek bar")
                             .on_hover_text("Playhead glow, bars that follow the bass, and the time under the pointer.");
                         ui.checkbox(&mut effects.transitions, "Transitions")
-                            .on_hover_text("Pages fade in, cards rise in, covers crossfade and play/pause morphs.");
+                            .on_hover_text("Pages and the Now playing views fade in, cards rise in, covers crossfade and play/pause morphs.");
                     });
                 });
                 ui.collapsing("Look", |ui| {

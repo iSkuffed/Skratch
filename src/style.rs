@@ -2,9 +2,9 @@
 //! Everything is painted with egui primitives; the only bundled assets are the logo and two
 //! typefaces (DM Sans and DM Serif Display, SIL Open Font Licence in `assets/fonts`).
 use eframe::egui::{
-    self, Align2, Color32, ColorImage, Context, CornerRadius, CursorIcon, FontId, Mesh, Painter,
-    PointerButton, Pos2, Rect, Response, Sense, Shape, Stroke, TextureId, Ui, Vec2,
-    ViewportCommand, ecolor::HsvaGamma as Hsva, viewport::ResizeDirection,
+    self, Align, Align2, Color32, ColorImage, Context, CornerRadius, CursorIcon, FontId, Mesh,
+    Painter, PointerButton, Pos2, Rect, Response, Sense, Shape, Stroke, TextureId, Ui, Vec2,
+    ViewportCommand, ecolor::HsvaGamma as Hsva, pos2, vec2, viewport::ResizeDirection,
 };
 use std::{
     f32::consts::TAU,
@@ -807,5 +807,217 @@ pub fn resize_edges(ctx: &Context) {
     ctx.set_cursor_icon(cursor);
     if ctx.input(|i| i.pointer.primary_pressed()) {
         hand_to_compositor(ctx, ViewportCommand::BeginResize(direction));
+    }
+}
+
+/// How dark the settings drawer is at `t`: 0 at its left edge, 1 at the panel's right edge.
+/// Clear at the left, deepening towards the right.
+pub fn drawer_alpha(t: f32) -> f32 {
+    0.92 * (1.0 - (1.0 - t.clamp(0.0, 1.0)).powf(2.2))
+}
+
+/// The settings drawer's backing: a dark wash that fades out towards the left, and over the
+/// first `soft_top` pixels downwards, so its top edge does not show as a line.
+pub fn drawer_backing(p: &Painter, rect: Rect, soft_top: f32) {
+    const STEPS: u32 = 16;
+    let rows = [
+        (rect.top(), 0.0_f32),
+        ((rect.top() + soft_top).min(rect.bottom()), 1.0),
+        (rect.bottom(), 1.0),
+    ];
+    let mut mesh = Mesh::default();
+    for k in 0..=STEPS {
+        let across = k as f32 / STEPS as f32;
+        let x = egui::lerp(rect.x_range(), across);
+        for (y, down) in rows {
+            let alpha = (drawer_alpha(across) * down * 255.0) as u8;
+            mesh.colored_vertex(pos2(x, y), Color32::from_rgba_unmultiplied(8, 7, 6, alpha));
+        }
+    }
+    // three vertices per column, so two cells between neighbouring columns
+    for k in 0..STEPS {
+        let column = 3 * k;
+        for cell in 0..2 {
+            let a = column + cell;
+            mesh.add_triangle(a, a + 1, a + 3);
+            mesh.add_triangle(a + 1, a + 3, a + 4);
+        }
+    }
+    p.add(Shape::mesh(mesh));
+}
+
+/// A cog: a ring with eight teeth.
+pub fn gear(p: &Painter, c: Pos2, r: f32, colour: Color32) {
+    p.circle_stroke(c, r * 0.58, Stroke::new(r * 0.28, colour));
+    for k in 0..8 {
+        let d = Vec2::angled(k as f32 * TAU / 8.0);
+        p.line_segment([c + d * r * 0.75, c + d * r], Stroke::new(r * 0.36, colour));
+    }
+}
+
+/// A rounded search box: a magnifier, a clear button once something is typed, and an optional
+/// small chip at the end (label, hover text). Escape empties it. Returns the text box's
+/// response, marked changed when the text was cleared, and whether the chip was clicked.
+pub fn search_field(
+    ui: &mut Ui,
+    text: &mut String,
+    id: egui::Id,
+    hint: &str,
+    chip: Option<(&str, &str)>,
+    accent: Color32,
+) -> (Response, bool) {
+    const HEIGHT: f32 = 32.0;
+    let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEIGHT), Sense::hover());
+    let bar_hit = ui.interact(bar, id.with("bar"), Sense::click());
+    let focused = ui.memory(|m| m.has_focus(id));
+    ui.painter().rect(
+        bar,
+        CornerRadius::same((HEIGHT / 2.0) as u8),
+        Color32::from_black_alpha(110),
+        Stroke::new(1.0_f32, if focused { accent } else { EDGE }),
+        egui::StrokeKind::Inside,
+    );
+    let ink = if focused { CREAM } else { CREAM_DIM };
+    let lens = pos2(bar.left() + 17.0, bar.center().y - 1.0);
+    ui.painter()
+        .circle_stroke(lens, 5.0, Stroke::new(1.5_f32, ink));
+    ui.painter().line_segment(
+        [lens + vec2(3.6, 3.6), lens + vec2(7.5, 7.5)],
+        Stroke::new(1.8_f32, ink),
+    );
+    // the right end, from the edge inwards: the chip, then the clear button
+    let mut right = bar.right() - 12.0;
+    let mut chip_clicked = false;
+    if let Some((label, hover)) = chip {
+        let galley =
+            ui.painter()
+                .layout_no_wrap(label.into(), egui::FontId::proportional(12.0), CREAM);
+        let width = galley.size().x + 16.0;
+        let rect = Rect::from_min_size(
+            pos2(right - width, bar.center().y - 10.0),
+            vec2(width, 20.0),
+        );
+        let hit = ui
+            .interact(rect, id.with("chip"), Sense::click())
+            .on_hover_text(hover)
+            .on_hover_cursor(CursorIcon::PointingHand);
+        let fill = if hit.hovered() {
+            Color32::from_white_alpha(34)
+        } else {
+            Color32::from_white_alpha(16)
+        };
+        ui.painter().rect_filled(rect, CornerRadius::same(10), fill);
+        ui.painter()
+            .galley(rect.center() - galley.size() / 2.0, galley, CREAM);
+        chip_clicked = hit.clicked();
+        right = rect.left() - 8.0;
+    }
+    let mut cleared = false;
+    if !text.is_empty() {
+        let c = pos2(right - 8.0, bar.center().y);
+        let hit = ui
+            .interact(
+                Rect::from_center_size(c, Vec2::splat(20.0)),
+                id.with("clear"),
+                Sense::click(),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand);
+        let ink = if hit.hovered() { CREAM } else { CREAM_DIM };
+        for side in [1.0, -1.0] {
+            ui.painter().line_segment(
+                [c + vec2(-3.5, -3.5 * side), c + vec2(3.5, 3.5 * side)],
+                Stroke::new(1.5_f32, ink),
+            );
+        }
+        if hit.clicked() {
+            text.clear();
+            cleared = true;
+        }
+        right = c.x - 12.0;
+    }
+    let edit = Rect::from_min_max(
+        pos2(bar.left() + 34.0, bar.top() + 2.0),
+        // a very narrow bar still gets a text box, however little of it shows
+        pos2(right.max(bar.left() + 60.0), bar.bottom() - 2.0),
+    );
+    let mut response = ui.put(
+        edit,
+        egui::TextEdit::singleline(text)
+            .id(id)
+            .frame(false)
+            .margin(egui::Margin::ZERO)
+            .hint_text(hint)
+            .vertical_align(Align::Center)
+            .desired_width(edit.width()),
+    );
+    if bar_hit.clicked() {
+        response.request_focus();
+    }
+    // Escape takes the focus away before the box is drawn, so look for the focus just lost
+    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        text.clear();
+        cleared = true;
+    }
+    if cleared {
+        response.mark_changed();
+    }
+    (response, chip_clicked)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs one frame with a search box in it and returns whether it reported a change.
+    fn search_frame(ctx: &egui::Context, text: &mut String, events: Vec<egui::Event>) -> bool {
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0)));
+        raw.events = events;
+        let mut changed = false;
+        let _ = ctx.run(raw, |ctx| {
+            egui::Area::new("test-area".into()).show(ctx, |ui| {
+                ui.set_width(300.0);
+                let (reply, _) = search_field(ui, text, "test-search".into(), "hint", None, ACCENT);
+                changed = reply.changed();
+            });
+        });
+        changed
+    }
+
+    #[test]
+    fn the_search_box_takes_text_and_escape_empties_it() {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        // the box has to be on screen before it can be given the keyboard
+        search_frame(&ctx, &mut text, vec![]);
+        ctx.memory_mut(|m| m.request_focus("test-search".into()));
+        search_frame(&ctx, &mut text, vec![]);
+        assert!(search_frame(
+            &ctx,
+            &mut text,
+            vec![egui::Event::Text("abc".into())]
+        ));
+        assert_eq!(text, "abc");
+        let escape = egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        assert!(search_frame(&ctx, &mut text, vec![escape]));
+        assert_eq!(text, "");
+        assert!(!ctx.memory(|m| m.has_focus("test-search".into())));
+    }
+
+    #[test]
+    fn the_drawer_is_clear_at_its_left_and_darkest_at_its_right() {
+        assert_eq!(drawer_alpha(0.0), 0.0);
+        assert!((drawer_alpha(1.0) - 0.92).abs() < 1e-6);
+        let steps: Vec<f32> = (0..=20).map(|k| drawer_alpha(k as f32 / 20.0)).collect();
+        assert!(steps.windows(2).all(|pair| pair[0] < pair[1]));
+        // out-of-range input stays on the curve's ends
+        assert_eq!(drawer_alpha(-3.0), 0.0);
+        assert_eq!(drawer_alpha(5.0), drawer_alpha(1.0));
     }
 }

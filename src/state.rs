@@ -91,6 +91,8 @@ pub struct Visualizer {
     pub fill_when_no_lyrics: bool,
     /// The spinning record sits in the middle of the full-screen view.
     pub record: bool,
+    /// Up next and Library show the visualizer, darkened, behind their lists.
+    pub behind_lists: bool,
     /// Bright caps that hang above the bars and fall.
     pub peak_caps: bool,
     /// A faded copy of the bars below them.
@@ -104,6 +106,7 @@ impl Default for Visualizer {
             lyrics: true,
             lyric_side: LyricSide::Top,
             fill_when_no_lyrics: true,
+            behind_lists: true,
             record: true,
             peak_caps: true,
             reflection: true,
@@ -193,7 +196,8 @@ pub struct Effects {
     pub scratch: bool,
     /// Playhead glow, bars that follow the bass, and a scrub line on hover.
     pub seek_life: bool,
-    /// Pages fade in, cards stagger in, covers crossfade and play/pause morphs.
+    /// Pages and the Now playing views fade in, cards stagger in, covers crossfade and
+    /// play/pause morphs.
     pub transitions: bool,
 }
 

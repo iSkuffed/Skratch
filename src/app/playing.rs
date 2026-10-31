@@ -1,6 +1,6 @@
 //! The "Now playing" page: a big spinning record next to a panel the user can switch
 //! between the track details, the queue and the whole library.
-use super::{Action, Skratch, display, lyricview};
+use super::{Action, Skratch, display, lyricview, matches_query};
 use crate::{
     state::{NowPanel, RhymeShow, Source, VizStyle},
     style,
@@ -12,6 +12,20 @@ use skratch::{
     lyrics::{self, Lyrics, OtherState, Status},
     model::Track,
 };
+use std::time::Duration;
+
+/// How long the settings drawer stays out once the pointer has left it (or the window has lost
+/// focus) before it slides away, in seconds.
+const DRAWER_LINGER: f64 = 1.2;
+
+/// The settings drawer that slides out over the right of the panel from its gear.
+#[derive(Default)]
+pub struct Drawer {
+    /// Out or sliding out; false once it has been told to go.
+    open: bool,
+    /// When (egui seconds) the pointer was last on the gear or the drawer, window focused.
+    near_at: f64,
+}
 
 impl Skratch {
     pub(super) fn playing_ui(&mut self, ui: &mut egui::Ui) {
@@ -32,6 +46,7 @@ impl Skratch {
                 .as_deref()
                 .and_then(|path| self.art.texture(path));
             let label = style::seed_color(&format!("{}{}", track.artist, track.album));
+            self.tab_fade = self.panel_fade(ui.ctx());
             let (art_mix, old_art, _) = self.crossfade(ui.ctx());
             let progress = (self.state.position / self.duration.max(1.0)).clamp(0.0, 1.0) as f32;
             let area = ui.available_rect_before_wrap();
@@ -121,15 +136,17 @@ impl Skratch {
             );
             ui.scope_builder(egui::UiBuilder::new().max_rect(panel), |ui| {
                 ui.set_width(panel.width());
-                self.panel_ui(ui, &track);
+                self.panel_ui(ui, &track, area);
             });
         });
     }
 
     /// The switchable right-hand panel: a row of views to pick from, then the chosen content.
-    fn panel_ui(&mut self, ui: &mut egui::Ui, track: &skratch::model::Track) {
+    /// `edge` is the whole area the page has, which the settings drawer slides out within.
+    fn panel_ui(&mut self, ui: &mut egui::Ui, track: &skratch::model::Track, edge: egui::Rect) {
         let panel = self.state.now_panel;
-        ui.horizontal(|ui| {
+        let mut gear = None;
+        let header = ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 18.0;
             for choice in NowPanel::ALL {
                 let active = choice == panel;
@@ -152,60 +169,63 @@ impl Skratch {
                     self.listed = None;
                 }
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if panel == NowPanel::Visualizer {
-                    let config = egui::containers::menu::MenuConfig::new()
-                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-                    egui::containers::menu::MenuButton::new("...")
-                        .config(config)
-                        .ui(ui, |ui| self.viz_menu(ui, false));
-                    self.viz_full_button(ui);
-                }
-                if panel == NowPanel::Lyrics {
-                    // stays open while display options are ticked; the actions close it themselves
-                    let config = egui::containers::menu::MenuConfig::new()
-                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-                    egui::containers::menu::MenuButton::new("...")
-                        .config(config)
-                        .ui(ui, |ui| self.lyrics_menu(ui, track));
-                }
-            });
+            // Details has nothing to set, and the lyrics editor has no use for the drawer
+            if panel != NowPanel::Details && self.lyrics.editing.is_none() {
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    gear = Some(self.settings_gear(ui));
+                });
+            }
         });
         ui.add_space(4.0);
         let area = ui.available_rect_before_wrap();
-        match panel {
-            NowPanel::Details => self.details(ui, track),
-            NowPanel::Lyrics => {
-                // a track without lyrics gets the visualizer at full strength, the message on top
-                let dir = self.data_dir.join("lyrics");
-                self.lyrics
-                    .update(ui.ctx(), track, &dir, self.state.lyric_sources());
-                let none = matches!(self.lyrics.status, Status::Missing);
-                if none
-                    && self.lyrics.editing.is_none()
-                    && self.state.visualizer.fill_when_no_lyrics
-                    && !self.ring_on_record()
-                {
-                    self.viz_panel(ui, area, 1.0);
-                }
-                self.lyrics(ui, track);
-            }
-            NowPanel::Visualizer => {
-                let dir = self.data_dir.join("lyrics");
-                self.lyrics
-                    .update(ui.ctx(), track, &dir, self.state.lyric_sources());
-                let over = self.state.visualizer.lyrics
-                    && matches!(self.lyrics.status, Status::Found(_))
-                    && self.lyrics.editing.is_none();
-                if !self.ring_on_record() {
-                    self.viz_panel(ui, area, if over { 0.3 } else { 1.0 });
-                }
-                if over {
+        let fade = self.tab_fade;
+        // the chosen view fades in and rises a little whenever the tab changes
+        ui.scope(|ui| {
+            ui.set_opacity(fade);
+            ui.add_space(8.0 * (1.0 - fade));
+            match panel {
+                NowPanel::Details => self.details(ui, track),
+                NowPanel::Lyrics => {
+                    // a track without lyrics gets the visualizer at full strength, the message on top
+                    let dir = self.data_dir.join("lyrics");
+                    self.lyrics
+                        .update(ui.ctx(), track, &dir, self.state.lyric_sources());
+                    let none = matches!(self.lyrics.status, Status::Missing);
+                    if none
+                        && self.lyrics.editing.is_none()
+                        && self.state.visualizer.fill_when_no_lyrics
+                        && !self.ring_on_record()
+                    {
+                        self.viz_panel(ui, area, 1.0);
+                    }
                     self.lyrics(ui, track);
                 }
+                NowPanel::Visualizer => {
+                    let dir = self.data_dir.join("lyrics");
+                    self.lyrics
+                        .update(ui.ctx(), track, &dir, self.state.lyric_sources());
+                    let over = self.state.visualizer.lyrics
+                        && matches!(self.lyrics.status, Status::Found(_))
+                        && self.lyrics.editing.is_none();
+                    if !self.ring_on_record() {
+                        self.viz_panel(ui, area, if over { 0.3 } else { 1.0 });
+                    }
+                    if over {
+                        self.lyrics(ui, track);
+                    }
+                }
+                NowPanel::UpNext | NowPanel::Library => {
+                    // the visualizer keeps running behind the list, under a dark scrim
+                    if self.state.visualizer.behind_lists && !self.ring_on_record() {
+                        self.viz_panel(ui, area, 1.0);
+                        ui.painter()
+                            .rect_filled(area, 10, egui::Color32::from_black_alpha(150));
+                    }
+                    self.panel_list(ui, panel);
+                }
             }
-            _ => self.panel_list(ui, panel),
-        }
+        });
+        self.settings_drawer(ui, track, gear, header.response.rect.bottom(), edge);
     }
 
     /// Whether the visualizer's ring is drawn around the record on the left, not in the panel.
@@ -219,8 +239,146 @@ impl Skratch {
                         && self.lyrics.editing.is_none()
                         && matches!(self.lyrics.status, Status::Missing)
                 }
-                _ => false,
+                NowPanel::UpNext | NowPanel::Library => cfg.behind_lists,
+                NowPanel::Details => false,
             }
+    }
+
+    /// How far the chosen view has faded in (0 to 1); starts over whenever the tab changes.
+    fn panel_fade(&mut self, ctx: &egui::Context) -> f32 {
+        let (panel, now) = (self.state.now_panel, ctx.input(|i| i.time));
+        if self.panel_shown != Some(panel) {
+            // the view the page opens on is simply there; only a switch fades
+            self.panel_shown_at = if self.panel_shown.is_some() {
+                now
+            } else {
+                f64::NEG_INFINITY
+            };
+            self.panel_shown = Some(panel);
+        }
+        if !self.state.effects.transitions() {
+            return 1.0;
+        }
+        let t = ((now - self.panel_shown_at) / 0.18).clamp(0.0, 1.0) as f32;
+        if t < 1.0 {
+            ctx.request_repaint();
+        }
+        egui::emath::easing::cubic_out(t)
+    }
+
+    /// The cog at the end of the tab row; the pointer on it brings out the settings drawer.
+    fn settings_gear(&self, ui: &mut egui::Ui) -> egui::Rect {
+        let (rect, response) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
+        let lit = self.drawer.open || response.hovered();
+        let colour = if lit { style::CREAM } else { style::CREAM_DIM };
+        style::gear(ui.painter(), rect.center(), 9.0, colour);
+        rect
+    }
+
+    /// The settings drawer: slides out over the right of the page while the pointer is on the
+    /// gear or on it, and back in once the pointer has been away (or the window unfocused) for
+    /// a moment. It holds the visualizer's options and everything about the lyrics.
+    fn settings_drawer(
+        &mut self,
+        ui: &egui::Ui,
+        track: &Track,
+        gear: Option<egui::Rect>,
+        top: f32,
+        edge: egui::Rect,
+    ) {
+        let ctx = ui.ctx().clone();
+        let id = egui::Id::new("settings-drawer");
+        let (now, focused) = ctx.input(|i| (i.time, i.focused));
+        // an open drawer this old was left behind when the page was switched away from
+        if self.drawer.open && now - self.drawer.near_at > DRAWER_LINGER + 1.0 {
+            self.drawer.open = false;
+            ctx.animate_bool_with_time(id, false, 0.0);
+        }
+        let pointer = ctx.input(|i| i.pointer.hover_pos()).filter(|_| focused);
+        let width = (edge.width() * 0.5).clamp(300.0, 540.0).min(edge.width());
+        // the pointer counts as on the drawer from where it has become visibly dark
+        let hit =
+            egui::Rect::from_min_max(pos2(edge.right() - width * 0.8, top), edge.right_bottom());
+        let over_gear = gear
+            .zip(pointer)
+            .is_some_and(|(gear, at)| gear.expand(4.0).contains(at));
+        let over_drawer = self.drawer.open && pointer.is_some_and(|at| hit.contains(at));
+        if gear.is_none() {
+            self.drawer.open = false;
+        } else if over_gear || over_drawer {
+            self.drawer.open = true;
+            self.drawer.near_at = now;
+        } else if self.drawer.open {
+            let left = self.drawer.near_at + DRAWER_LINGER - now;
+            if left <= 0.0 {
+                self.drawer.open = false;
+            } else {
+                ctx.request_repaint_after(Duration::from_secs_f64(left));
+            }
+        }
+        let out = if self.state.effects.transitions() {
+            ctx.animate_bool_with_time_and_easing(
+                id,
+                self.drawer.open,
+                0.24,
+                egui::emath::easing::cubic_out,
+            )
+        } else {
+            f32::from(self.drawer.open)
+        };
+        if out <= 0.0 {
+            return;
+        }
+        let shift = vec2((1.0 - out) * width * 0.35, 0.0);
+        let backing =
+            egui::Rect::from_min_max(pos2(edge.right() - width, top), edge.right_bottom());
+        let content = egui::Rect::from_min_max(
+            pos2(edge.right() - 24.0 - (width * 0.62).max(240.0), top + 14.0),
+            pos2(edge.right() - 24.0, edge.bottom() - 14.0),
+        );
+        let acted = egui::Area::new(id.with("area"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(hit.min + shift)
+            .constrain(false)
+            .show(&ctx, |ui| {
+                ui.set_opacity(out);
+                // the whole strip belongs to the drawer, so clicks on it miss what is beneath
+                ui.allocate_rect(hit.translate(shift), Sense::hover());
+                style::drawer_backing(ui.painter(), backing.translate(shift), 28.0);
+                ui.scope_builder(
+                    egui::UiBuilder::new().max_rect(content.translate(shift)),
+                    |ui| {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink(false)
+                            .show(ui, |ui| self.drawer_contents(ui, track))
+                            .inner
+                    },
+                )
+                .inner
+            })
+            .inner;
+        if acted {
+            self.drawer.open = false;
+        }
+    }
+
+    /// What the drawer holds. Returns whether something was chosen that should put it away.
+    fn drawer_contents(&mut self, ui: &mut egui::Ui, track: &Track) -> bool {
+        let heading = |ui: &mut egui::Ui, text: &str| {
+            ui.label(
+                RichText::new(text)
+                    .size(11.0)
+                    .strong()
+                    .color(style::CREAM_DIM),
+            );
+        };
+        heading(ui, "VISUALIZER");
+        self.viz_menu(ui, false);
+        self.viz_full_button(ui);
+        ui.add_space(12.0);
+        heading(ui, "LYRICS");
+        let acted = self.lyrics_menu(ui, track);
+        acted || self.viz.full
     }
 
     fn details(&mut self, ui: &mut egui::Ui, track: &skratch::model::Track) {
@@ -248,29 +406,33 @@ impl Skratch {
         }
     }
 
-    /// Fix wrong lyrics: type them, bring them in from a file, drop them, or go back to the
-    /// automatic ones. Kept in the app's data, so the music files stay as they are.
-    fn lyrics_menu(&mut self, ui: &mut egui::Ui, track: &Track) {
+    /// Fix wrong lyrics (type them, bring them in from a file, drop them, or go back to the
+    /// automatic ones) and set how they look. Kept in the app's data, so the music files stay
+    /// as they are. Returns whether an action was taken that should put the drawer away.
+    fn lyrics_menu(&mut self, ui: &mut egui::Ui, track: &Track) -> bool {
         let dir = self.data_dir.join("lyrics");
-        if ui.button("Edit lyrics").clicked() {
-            self.lyrics.editing = Some(match &self.lyrics.status {
-                Status::Found(found) => found.to_text(),
-                _ => String::new(),
-            });
-            ui.close();
-        }
-        if ui.button("Import from file...").clicked() {
-            self.import_lyrics_file(ui.ctx());
-            ui.close();
-        }
-        if ui
-            .button("Clear lyrics")
-            .on_hover_text("Wrong lyrics: forget them and stop looking for this track")
-            .clicked()
-        {
-            self.save_lyrics(&dir, track, "");
-            ui.close();
-        }
+        let mut acted = false;
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Edit lyrics").clicked() {
+                self.lyrics.editing = Some(match &self.lyrics.status {
+                    Status::Found(found) => found.to_text(),
+                    _ => String::new(),
+                });
+                acted = true;
+            }
+            if ui.button("Import from file...").clicked() {
+                self.import_lyrics_file(ui.ctx());
+                acted = true;
+            }
+            if ui
+                .button("Clear lyrics")
+                .on_hover_text("Wrong lyrics: forget them and stop looking for this track")
+                .clicked()
+            {
+                self.save_lyrics(&dir, track, "");
+                acted = true;
+            }
+        });
         let online = self.state.lyric_sources();
         let button = ui
             .add_enabled(
@@ -297,17 +459,19 @@ impl Skratch {
         }
         ui.separator();
         self.lyric_style_menu(ui);
-        ui.separator();
-        if lyrics::has_user_version(&dir, track)
-            && ui
+        if lyrics::has_user_version(&dir, track) {
+            ui.separator();
+            if ui
                 .button("Back to automatic lyrics")
                 .on_hover_text("Drop what was typed, imported or cleared and look again")
                 .clicked()
-        {
-            lyrics::restore(&dir, track);
-            self.lyrics.retry();
-            ui.close();
+            {
+                lyrics::restore(&dir, track);
+                self.lyrics.retry();
+                acted = true;
+            }
         }
+        acted
     }
 
     /// Every effect on the lyrics panel can be switched off here.
@@ -687,28 +851,44 @@ impl Skratch {
         }
     }
 
-    /// The queue or the whole library as clickable rows, scrolled to the playing track.
+    /// The queue or the whole library as clickable rows, scrolled to the playing track, under
+    /// a search bar that sits in the same place on both tabs.
     fn panel_list(&mut self, ui: &mut egui::Ui, panel: NowPanel) {
+        let up_next = panel == NowPanel::UpNext;
+        // Search within what is playing: an album or playlist stays an album or playlist.
+        let scoped = !up_next && matches!(self.state.source, Source::Tracks(_));
+        let hint = match (up_next, scoped) {
+            (true, _) => "Search the queue",
+            (false, true) => "Search what is playing  (Ctrl+F)",
+            (false, false) => "Search library  (Ctrl+F)",
+        };
+        let (typed, widen) = if up_next {
+            let id = egui::Id::new("queue-search");
+            style::search_field(ui, &mut self.queue_search, id, hint, None, self.accent)
+        } else {
+            let id = egui::Id::new(super::SEARCH_ID);
+            let chip = scoped.then_some(("All tracks", "Search the whole library instead"));
+            style::search_field(ui, &mut self.search, id, hint, chip, self.accent)
+        };
+        if widen {
+            self.state.source = Source::Library;
+        }
+        if typed.changed() && !up_next {
+            self.rebuild();
+        }
+        ui.add_space(6.0);
         // (track index, position in the queue, position among the visible tracks)
-        let rows: Vec<(usize, Option<usize>, usize)> = if panel == NowPanel::UpNext {
+        let rows: Vec<(usize, Option<usize>, usize)> = if up_next {
+            let query = self.queue_search.to_lowercase();
             self.state
                 .queue
                 .ids
                 .iter()
                 .enumerate()
                 .filter_map(|(q, id)| self.by_id.get(id).map(|i| (*i, Some(q), 0)))
+                .filter(|(i, ..)| matches_query(&self.tracks[*i], &query))
                 .collect()
         } else {
-            let search = ui.add(
-                egui::TextEdit::singleline(&mut self.search)
-                    .id(super::SEARCH_ID.into())
-                    .hint_text("Search library  (Ctrl+F)")
-                    .desired_width(f32::INFINITY),
-            );
-            if search.changed() {
-                self.rebuild();
-            }
-            // Search within what is playing: an album or playlist stays an album or playlist.
             match &self.state.source {
                 Source::Library => self
                     .filtered
@@ -719,27 +899,30 @@ impl Skratch {
                 Source::Tracks(ids) => {
                     let matching: std::collections::HashSet<usize> =
                         self.filtered.iter().copied().collect();
-                    let rows = ids
-                        .iter()
+                    ids.iter()
                         .filter_map(|id| self.by_id.get(id))
                         .filter(|i| matching.contains(i))
                         .enumerate()
                         .map(|(r, i)| (*i, None, r))
-                        .collect();
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Searching what is playing")
-                                .small()
-                                .color(style::CREAM_DIM),
-                        );
-                        if ui.small_button("All tracks").clicked() {
-                            self.state.source = Source::Library;
-                        }
-                    });
-                    rows
+                        .collect()
                 }
             }
         };
+        if rows.is_empty() {
+            let searching = !if up_next {
+                &self.queue_search
+            } else {
+                &self.search
+            }
+            .is_empty();
+            let nothing = match (searching, up_next) {
+                (true, _) => "Nothing matches.",
+                (false, true) => "The queue is empty.",
+                (false, false) => "No tracks yet.",
+            };
+            ui.add_space(8.0);
+            ui.label(RichText::new(nothing).color(style::CREAM_DIM));
+        }
         let current = self.state.queue.current_id();
         let now = ui.input(|i| i.time);
         let bounds = ui.available_rect_before_wrap();

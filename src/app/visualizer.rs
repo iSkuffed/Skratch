@@ -267,8 +267,11 @@ impl Skratch {
         let cfg = self.state.visualizer.clone();
         let inner = r * 1.14;
         let rect = Rect::from_center_size(centre, vec2(1.0, 1.0) * 2.0 * (inner + r * 0.5 + 8.0));
+        // it fades in with the view it belongs to, like the rest of the panel
+        let mut painter = ui.painter().clone();
+        painter.multiply_opacity(self.tab_fade);
         self.viz.paint(
-            ui.painter(),
+            &painter,
             rect,
             &cfg,
             self.accent,
@@ -290,11 +293,12 @@ impl Skratch {
             &mut cfg.lyrics,
             if full { "Lyrics" } else { "Lyrics over it" },
         );
-        ui.checkbox(
-            &mut self.state.lyric_style.shadow,
-            "Soft shadow behind lyrics",
-        );
         if full {
+            // the panel's drawer has this among the lyrics' own display options
+            ui.checkbox(
+                &mut self.state.lyric_style.shadow,
+                "Soft shadow behind lyrics",
+            );
             ui.add_enabled_ui(cfg.lyrics, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Lyrics at");
@@ -309,6 +313,7 @@ impl Skratch {
                 &mut cfg.fill_when_no_lyrics,
                 "Fill the lyrics panel when a track has none",
             );
+            ui.checkbox(&mut cfg.behind_lists, "Show behind Up next and Library");
         }
         ui.checkbox(&mut cfg.peak_caps, "Falling peak caps");
         ui.checkbox(&mut cfg.reflection, "Reflection (bars)");
