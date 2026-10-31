@@ -180,7 +180,7 @@ impl Skratch {
                 let dir = self.data_dir.join("lyrics");
                 self.lyrics
                     .update(ui.ctx(), track, &dir, self.state.lyric_sources());
-                let none = matches!(self.lyrics.status, Status::Missing | Status::Failed(_));
+                let none = matches!(self.lyrics.status, Status::Missing);
                 if none
                     && self.lyrics.editing.is_none()
                     && self.state.visualizer.fill_when_no_lyrics
@@ -612,15 +612,26 @@ impl Skratch {
                     });
                 self.lyrics.scrolled = current;
             }
-            Status::Missing | Status::Failed(_) => {
+            Status::Missing => {
                 ui.add_space(8.0);
-                if let Status::Failed(error) = &self.lyrics.status {
-                    ui.label(dim(format!("Could not look lyrics up: {error}")));
-                    if ui.button("Try again").clicked() {
-                        self.lyrics.retry();
-                    }
-                } else if self.state.lyrics_online {
+                if self.state.lyrics_online {
+                    let dir = self.data_dir.join("lyrics");
                     ui.label(dim("No lyrics found for this track.".into()));
+                    if !self.lyrics.notes.is_empty() {
+                        egui::CollapsingHeader::new("Show details")
+                            .id_salt("lyric-notes")
+                            .show(ui, |ui| {
+                                for (source, said) in &self.lyrics.notes {
+                                    ui.label(
+                                        RichText::new(format!("{source}: {said}"))
+                                            .color(style::CREAM_DIM),
+                                    );
+                                }
+                            });
+                    }
+                    if !lyrics::has_user_version(&dir, track) && ui.button("Try again").clicked() {
+                        self.lyrics.ask_again(&dir, track);
+                    }
                 } else {
                     ui.label(dim(
                         "No lyrics in the file or beside it (a .lrc file).".into()

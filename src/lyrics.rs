@@ -315,16 +315,39 @@ pub struct Online {
     pub fallback: bool,
 }
 
-fn find(track: &Track, dir: &Path, online: Online) -> Result<Option<Lyrics>> {
+/// What each online source said, for the details under a "no lyrics" message.
+pub type Notes = Vec<(&'static str, String)>;
+
+/// The outcome of a lookup: the lyrics, if any, and what the sources answered.
+pub struct Answer {
+    pub lyrics: Option<Lyrics>,
+    pub notes: Notes,
+}
+
+fn note(source: &'static str, answer: &Result<Option<Lyrics>>, notes: &mut Notes) {
+    let said = match answer {
+        Ok(Some(Lyrics::Synced(_))) => "found timed lyrics".to_string(),
+        Ok(Some(Lyrics::Plain(_))) => "found plain lyrics".to_string(),
+        Ok(None) => "nothing matched this track".to_string(),
+        Err(error) => format!("could not be reached ({error:#})"),
+    };
+    notes.push((source, said));
+}
+
+fn find(track: &Track, dir: &Path, online: Online) -> Answer {
+    let local = |lyrics| Answer {
+        lyrics,
+        notes: Notes::new(),
+    };
     if let Ok(text) = fs::read_to_string(user_file(dir, track)) {
-        return Ok(Lyrics::from_text(&text));
+        return local(Lyrics::from_text(&text));
     }
     if let Some(lyrics) = fs::read_to_string(track.path.with_extension("lrc"))
         .ok()
         .and_then(|text| Lyrics::from_text(&text))
         .or_else(|| embedded(&track.path))
     {
-        return Ok(Some(lyrics));
+        return local(Some(lyrics));
     }
     let cache = cache_file(dir, track);
     if let Ok(bytes) = fs::read(&cache)
@@ -332,7 +355,7 @@ fn find(track: &Track, dir: &Path, online: Online) -> Result<Option<Lyrics>> {
     {
         let text = |key: &str| saved[key].as_str().and_then(Lyrics::from_text);
         if let Some(lyrics) = text("synced").or_else(|| text("plain")) {
-            return Ok(Some(lyrics));
+            return local(Some(lyrics));
         }
         let fresh = fs::metadata(&cache)
             .and_then(|m| m.modified())
@@ -340,30 +363,34 @@ fn find(track: &Track, dir: &Path, online: Online) -> Result<Option<Lyrics>> {
             .and_then(|t| SystemTime::now().duration_since(t).ok())
             .is_some_and(|age| age < MISS_TTL);
         if fresh {
-            return Ok(None);
+            return Answer {
+                lyrics: None,
+                notes: vec![(
+                    "Earlier lookup",
+                    "nothing was found; Skratch asks again after a week".into(),
+                )],
+            };
         }
     }
     if !online.allowed {
-        return Ok(None);
+        return local(None);
     }
+    let mut notes = Notes::new();
     let primary = lrclib(track);
-    let mut lyrics = primary.as_ref().ok().cloned().flatten();
+    note("LRCLIB", &primary, &mut notes);
     // "nothing" is only remembered when every source we asked actually answered
     let mut complete = primary.is_ok();
+    let mut lyrics = primary.ok().flatten();
     if lyrics.is_none() && online.fallback {
-        match netease(track) {
-            Ok(found) => lyrics = found,
-            Err(_) => complete = false,
-        }
+        let second = netease(track);
+        note("NetEase", &second, &mut notes);
+        complete &= second.is_ok();
+        lyrics = second.ok().flatten();
     }
-    if let (None, Err(error)) = (&lyrics, primary) {
-        return Err(error);
+    if lyrics.is_some() || complete {
+        remember(dir, track, lyrics.as_ref());
     }
-    if lyrics.is_none() && !complete {
-        return Ok(None);
-    }
-    remember(dir, track, lyrics.as_ref());
-    Ok(lyrics)
+    Answer { lyrics, notes }
 }
 
 /// The first online lyrics that differ from `current`, preferring synced ones. `Err` only
@@ -398,17 +425,18 @@ pub enum Status {
     Loading,
     Found(Lyrics),
     Missing,
-    Failed(String),
 }
 
 /// Looks the playing track's lyrics up in the background and holds the answer.
 pub struct Lookup {
-    tx: Sender<(PathBuf, bool, Result<Option<Lyrics>>)>,
-    rx: Receiver<(PathBuf, bool, Result<Option<Lyrics>>)>,
+    tx: Sender<(PathBuf, bool, Answer)>,
+    rx: Receiver<(PathBuf, bool, Answer)>,
     track: Option<PathBuf>,
     /// Whether the answer in `status` already included the online lookup.
     asked_online: bool,
     pub status: Status,
+    /// What each source said when `status` is `Missing`.
+    pub notes: Notes,
     /// The synced line the panel last scrolled to.
     pub scrolled: Option<usize>,
     /// The lyrics being typed or imported, while the editor is open.
@@ -442,6 +470,7 @@ impl Default for Lookup {
             track: None,
             asked_online: false,
             status: Status::Loading,
+            notes: Notes::new(),
             scrolled: None,
             editing: None,
             marks: None,
@@ -464,6 +493,7 @@ impl Lookup {
             self.asked_online = online.allowed;
             self.other_state = OtherState::Idle;
             self.status = Status::Loading;
+            self.notes.clear();
             self.scrolled = None;
             self.editing = None;
             self.marks = None;
@@ -486,14 +516,11 @@ impl Lookup {
                 }
             };
         }
-        while let Ok((path, _, result)) = self.rx.try_recv() {
+        while let Ok((path, _, answer)) = self.rx.try_recv() {
             if self.track.as_deref() == Some(path.as_path()) {
                 self.marks = None;
-                self.status = match result {
-                    Ok(Some(lyrics)) => Status::Found(lyrics),
-                    Ok(None) => Status::Missing,
-                    Err(error) => Status::Failed(format!("{error:#}")),
-                };
+                self.status = answer.lyrics.map_or(Status::Missing, Status::Found);
+                self.notes = answer.notes;
             }
         }
     }
@@ -529,6 +556,12 @@ impl Lookup {
     /// Looks again, e.g. after a network failure.
     pub fn retry(&mut self) {
         self.track = None;
+    }
+
+    /// Asks the online sources again even though an earlier "nothing" was remembered.
+    pub fn ask_again(&mut self, dir: &Path, track: &Track) {
+        let _ = fs::remove_file(cache_file(dir, track));
+        self.retry();
     }
 
     fn spawn(&self, ctx: &egui::Context, track: Track, dir: PathBuf, online: Online) {
@@ -623,14 +656,14 @@ mod tests {
         let cache = dir.path().join("cache");
         save(&cache, &track, "right words").unwrap();
         assert_eq!(
-            find(&track, &cache, Online::default()).unwrap(),
+            find(&track, &cache, Online::default()).lyrics,
             Some(Lyrics::Plain("right words".into()))
         );
         save(&cache, &track, "").unwrap();
-        assert_eq!(find(&track, &cache, Online::default()).unwrap(), None);
+        assert_eq!(find(&track, &cache, Online::default()).lyrics, None);
         restore(&cache, &track);
         assert_eq!(
-            find(&track, &cache, Online::default()).unwrap(),
+            find(&track, &cache, Online::default()).lyrics,
             Some(Lyrics::Synced(vec![(5.0, "wrong".into())]))
         );
     }
@@ -646,7 +679,7 @@ mod tests {
             ..Track::default()
         };
         assert_eq!(
-            find(&track, &dir.path().join("cache"), Online::default()).unwrap(),
+            find(&track, &dir.path().join("cache"), Online::default()).lyrics,
             Some(Lyrics::Synced(vec![(5.0, "hello".into())]))
         );
     }
