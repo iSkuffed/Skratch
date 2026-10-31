@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "Skratch",
         options,
-        Box::new(move |cc| Ok(Box::new(app::Skratch::new(cc, data_dir)))),
+        Box::new(move |cc| Ok(Box::new(app::Shell::new(cc, data_dir)))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
 }

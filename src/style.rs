@@ -846,6 +846,47 @@ pub fn drawer_backing(p: &Painter, rect: Rect, soft_top: f32) {
     p.add(Shape::mesh(mesh));
 }
 
+/// How much of a list's dark backing is left `t` of the way down it (0 top, 1 bottom): all of
+/// it over the first quarter, then easing out to nothing at the end of the list.
+pub fn scrim_alpha(t: f32) -> f32 {
+    let s = ((t - 0.25) / 0.75).clamp(0.0, 1.0);
+    1.0 - s * s * (3.0 - 2.0 * s)
+}
+
+/// A black wash over `rect`, `alpha` dark at the top and clear at the bottom, with the top
+/// corners rounded by `radius`. Rows of vertices run down it, each as wide as the shape is there.
+pub fn scrim_mesh(rect: Rect, radius: f32, alpha: u8) -> Mesh {
+    const ARC: u32 = 5;
+    const BODY: u32 = 14;
+    let radius = radius.min(rect.height() / 2.0).max(0.0);
+    let arc = (0..=ARC).map(|k| radius * k as f32 / ARC as f32);
+    let body = (1..=BODY).map(|k| radius + (rect.height() - radius) * k as f32 / BODY as f32);
+    let mut mesh = Mesh::default();
+    for down in arc.chain(body) {
+        let inset = if down < radius {
+            radius - (radius * radius - (radius - down).powi(2)).max(0.0).sqrt()
+        } else {
+            0.0
+        };
+        let a = (f32::from(alpha) * scrim_alpha(down / rect.height().max(1.0))).round() as u8;
+        let colour = Color32::from_rgba_unmultiplied(0, 0, 0, a);
+        let y = rect.top() + down;
+        mesh.colored_vertex(pos2(rect.left() + inset, y), colour);
+        mesh.colored_vertex(pos2(rect.right() - inset, y), colour);
+    }
+    for row in 0..mesh.vertices.len() as u32 / 2 - 1 {
+        let a = 2 * row;
+        mesh.add_triangle(a, a + 1, a + 2);
+        mesh.add_triangle(a + 1, a + 2, a + 3);
+    }
+    mesh
+}
+
+/// The wash behind a list: see [`scrim_mesh`].
+pub fn scrim_down(p: &Painter, rect: Rect, radius: f32, alpha: u8) {
+    p.add(Shape::mesh(scrim_mesh(rect, radius, alpha)));
+}
+
 /// A cog: a ring with eight teeth.
 pub fn gear(p: &Painter, c: Pos2, r: f32, colour: Color32) {
     p.circle_stroke(c, r * 0.58, Stroke::new(r * 0.28, colour));
@@ -970,9 +1011,11 @@ mod tests {
 
     /// Runs one frame with a search box in it and returns whether it reported a change.
     fn search_frame(ctx: &egui::Context, text: &mut String, events: Vec<egui::Event>) -> bool {
-        let mut raw = egui::RawInput::default();
-        raw.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0)));
-        raw.events = events;
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))),
+            events,
+            ..Default::default()
+        };
         let mut changed = false;
         let _ = ctx.run(raw, |ctx| {
             egui::Area::new("test-area".into()).show(ctx, |ui| {
@@ -1008,6 +1051,33 @@ mod tests {
         assert!(search_frame(&ctx, &mut text, vec![escape]));
         assert_eq!(text, "");
         assert!(!ctx.memory(|m| m.has_focus("test-search".into())));
+    }
+
+    #[test]
+    fn the_list_backing_is_darkest_at_the_top_and_clear_at_the_end() {
+        assert_eq!(scrim_alpha(0.0), 1.0);
+        assert_eq!(scrim_alpha(0.25), 1.0);
+        assert_eq!(scrim_alpha(1.0), 0.0);
+        let steps: Vec<f32> = (0..=20).map(|k| scrim_alpha(k as f32 / 20.0)).collect();
+        assert!(steps.windows(2).all(|pair| pair[0] >= pair[1]));
+
+        let rect = Rect::from_min_size(pos2(10.0, 20.0), vec2(300.0, 400.0));
+        let mesh = scrim_mesh(rect, 10.0, 160);
+        // rows of two vertices, left then right; the first row is pulled in by the corner radius
+        assert_eq!(mesh.vertices[0].pos, pos2(20.0, 20.0));
+        assert_eq!(mesh.vertices[1].pos, pos2(300.0, 20.0));
+        let alphas: Vec<u8> = mesh.vertices.iter().map(|v| v.color.a()).collect();
+        assert_eq!(alphas[0], 160);
+        assert!(alphas.windows(2).all(|pair| pair[0] >= pair[1]));
+        let last = mesh.vertices.len() - 2;
+        assert_eq!(alphas[last], 0);
+        assert_eq!(mesh.vertices[last].pos, pos2(10.0, 420.0));
+        // every triangle uses vertices that exist
+        assert!(
+            mesh.indices
+                .iter()
+                .all(|i| (*i as usize) < mesh.vertices.len())
+        );
     }
 
     #[test]

@@ -28,7 +28,10 @@ mod fetch;
 mod lyricview;
 mod playing;
 mod setup;
+mod shell;
 mod visualizer;
+
+pub use shell::Shell;
 
 const SEARCH_ID: &str = "library-search";
 
@@ -268,14 +271,15 @@ pub struct Skratch {
     listed: Option<i64>,
     /// Until this time (egui seconds) a track change counts as caused by a click in that list.
     list_hold: f64,
-    /// What the Up next search box holds (the Library tab shares `search`).
-    queue_search: String,
-    /// The Now playing view last drawn and when it appeared, for the fade-in between views.
+    /// The Now playing view last drawn and when it appeared, for the animation between views.
     panel_shown: Option<NowPanel>,
     panel_shown_at: f64,
-    /// How far that fade has got this frame (0 to 1).
-    tab_fade: f32,
+    /// How far that animation has got this frame.
+    reveal: playing::Reveal,
     drawer: playing::Drawer,
+    /// When the last frame began. The watcher thread steps in when frames stop coming (a
+    /// minimised window gets none on Wayland), so playback and the media keys keep working.
+    frame_at: Instant,
 }
 
 impl Skratch {
@@ -393,11 +397,11 @@ impl Skratch {
             lyrics: lyrics::Lookup::default(),
             listed: None,
             list_hold: 0.0,
-            queue_search: String::new(),
             panel_shown: None,
             panel_shown_at: 0.0,
-            tab_fade: 1.0,
+            reveal: playing::Reveal::DONE,
             drawer: Default::default(),
+            frame_at: Instant::now(),
         };
         app.refresh_tools();
         app
@@ -815,11 +819,22 @@ impl Skratch {
                 _ => {}
             }
         }
+        self.keep_playing(ctx);
+        self.art.drain(ctx);
+    }
+
+    /// Handles what playback is waiting on: events from mpv (a track ending starts the next
+    /// one), the desktop's media keys and widget, and the periodic save. Runs every frame, and
+    /// also from the watcher thread when frames stop coming. Returns whether something changed
+    /// that a window showing the app should redraw for.
+    fn keep_playing(&mut self, ctx: &egui::Context) -> bool {
+        let mut changed = false;
         loop {
             let event = self.player.as_ref().and_then(|p| p.events.try_recv().ok());
             let Some(event) = event else {
                 break;
             };
+            changed |= !matches!(event, PlayerEvent::Position(_));
             match event {
                 PlayerEvent::Started => {
                     if let Some(position) = self.pending_seek.take() {
@@ -863,6 +878,7 @@ impl Skratch {
             let Some(event) = event else {
                 break;
             };
+            changed = true;
             match event {
                 MediaCommand::Play if !self.playing => self.perform(Action::Pause),
                 MediaCommand::Pause if self.playing => self.perform(Action::Pause),
@@ -902,7 +918,7 @@ impl Skratch {
             self.save();
             self.last_save = Instant::now();
         }
-        self.art.drain(ctx);
+        changed
     }
 
     fn save(&mut self) {
@@ -2691,6 +2707,7 @@ impl eframe::App for Skratch {
     }
 
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.frame_at = Instant::now();
         self.poll(ctx);
         self.poll_setup();
         self.poll_pick();
@@ -2699,8 +2716,11 @@ impl eframe::App for Skratch {
         let focused = ctx.input(|i| i.focused);
         if focused && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
             if self.view == View::Playing {
-                self.state.now_panel = NowPanel::Library;
-                self.listed = None;
+                // Up next and Library share one search box, so those two stay where they are
+                if !matches!(self.state.now_panel, NowPanel::UpNext | NowPanel::Library) {
+                    self.state.now_panel = NowPanel::Library;
+                    self.listed = None;
+                }
             } else if self.view == View::Downloads {
                 self.view = View::Tracks;
                 self.selected_group = None;

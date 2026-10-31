@@ -168,6 +168,8 @@ pub struct LyricStyle {
     pub sweep: bool,
     /// A faint dark halo behind the text, so it reads over bright covers and moving bars.
     pub shadow: bool,
+    /// A small "from LRCLIB" line under the lyrics, saying where they came from.
+    pub source: bool,
 }
 
 impl Default for LyricStyle {
@@ -181,6 +183,7 @@ impl Default for LyricStyle {
             rhymes: RhymeShow::All,
             sweep: true,
             shadow: true,
+            source: true,
         }
     }
 }

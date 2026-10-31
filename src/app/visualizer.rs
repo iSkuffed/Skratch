@@ -3,9 +3,7 @@
 //! only reads numbers and smooths them into bars that jump up and fall back.
 use super::{Skratch, style};
 use crate::state::{LyricSide, Visualizer, VizStyle};
-use eframe::egui::{
-    self, Align2, Color32, FontId, Mesh, Painter, Pos2, Rect, RichText, Stroke, pos2, vec2,
-};
+use eframe::egui::{self, Align2, Color32, FontId, Mesh, Painter, Pos2, Rect, Stroke, pos2, vec2};
 use skratch::{
     analysis::BANDS,
     lyrics::{Lyrics, Status},
@@ -269,7 +267,7 @@ impl Skratch {
         let rect = Rect::from_center_size(centre, vec2(1.0, 1.0) * 2.0 * (inner + r * 0.5 + 8.0));
         // it fades in with the view it belongs to, like the rest of the panel
         let mut painter = ui.painter().clone();
-        painter.multiply_opacity(self.tab_fade);
+        painter.multiply_opacity(self.reveal.uniform());
         self.viz.paint(
             &painter,
             rect,
@@ -281,7 +279,8 @@ impl Skratch {
         );
     }
 
-    /// Options shared by the panel's menu and the full-screen controls.
+    /// The visualizer's options, for the settings drawer and the full-screen controls (which
+    /// also have what only makes sense there: the lyrics and record on the screen).
     pub(super) fn viz_menu(&mut self, ui: &mut egui::Ui, full: bool) {
         let cfg = &mut self.state.visualizer;
         ui.horizontal(|ui| {
@@ -289,12 +288,9 @@ impl Skratch {
                 ui.selectable_value(&mut cfg.style, choice, choice.title());
             }
         });
-        ui.checkbox(
-            &mut cfg.lyrics,
-            if full { "Lyrics" } else { "Lyrics over it" },
-        );
         if full {
-            // the panel's drawer has this among the lyrics' own display options
+            // the drawer has these with the rest of the lyrics' own options
+            ui.checkbox(&mut cfg.lyrics, "Lyrics");
             ui.checkbox(
                 &mut self.state.lyric_style.shadow,
                 "Soft shadow behind lyrics",
@@ -309,16 +305,23 @@ impl Skratch {
             });
             ui.checkbox(&mut cfg.record, "Spinning record");
         } else {
+            ui.checkbox(&mut cfg.behind_lists, "Show behind Up next and Library");
             ui.checkbox(
                 &mut cfg.fill_when_no_lyrics,
                 "Fill the lyrics panel when a track has none",
             );
-            ui.checkbox(&mut cfg.behind_lists, "Show behind Up next and Library");
         }
         ui.checkbox(&mut cfg.peak_caps, "Falling peak caps");
         ui.checkbox(&mut cfg.reflection, "Reflection (bars)");
-        if ui.button("Reset visualizer").clicked() {
-            *cfg = Default::default();
+        let mut reset = false;
+        ui.horizontal_wrapped(|ui| {
+            reset = ui.button("Reset visualizer").clicked();
+            if !full {
+                self.viz_full_button(ui);
+            }
+        });
+        if reset {
+            self.state.visualizer = Default::default();
         }
     }
 
@@ -511,10 +514,10 @@ impl Skratch {
         }
     }
 
-    /// A small button that opens the full-screen view.
-    pub(super) fn viz_full_button(&mut self, ui: &mut egui::Ui) {
+    /// A button that opens the full-screen view.
+    fn viz_full_button(&mut self, ui: &mut egui::Ui) {
         if ui
-            .small_button(RichText::new("Full screen").color(style::CREAM_DIM))
+            .button("Full screen")
             .on_hover_text("Fill the window with the visualizer. Esc leaves.")
             .clicked()
         {
