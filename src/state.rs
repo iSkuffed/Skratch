@@ -32,6 +32,12 @@ impl NowPanel {
             Self::Visualizer => "Visualizer",
         }
     }
+
+    /// Lyrics and Visualizer are one page, the visualizer with the lyrics over it; the two tabs
+    /// only differ in which options they bring out.
+    pub fn is_stage(self) -> bool {
+        matches!(self, Self::Lyrics | Self::Visualizer)
+    }
 }
 
 /// How the spectrum is drawn.
@@ -87,8 +93,8 @@ pub struct Visualizer {
     /// Lyrics stay readable over the visualizer.
     pub lyrics: bool,
     pub lyric_side: LyricSide,
-    /// The lyrics panel shows the visualizer behind its message when a track has no lyrics.
-    pub fill_when_no_lyrics: bool,
+    /// The visualizer is on; false is the "Off" choice, which shows nothing in its place.
+    pub shown: bool,
     /// The spinning record sits in the middle of the full-screen view.
     pub record: bool,
     /// Up next and Library show the visualizer, darkened, behind their lists.
@@ -105,7 +111,7 @@ impl Default for Visualizer {
             style: VizStyle::Bars,
             lyrics: true,
             lyric_side: LyricSide::Top,
-            fill_when_no_lyrics: true,
+            shown: true,
             behind_lists: true,
             record: true,
             peak_caps: true,

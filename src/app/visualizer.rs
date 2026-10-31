@@ -285,7 +285,15 @@ impl Skratch {
         let cfg = &mut self.state.visualizer;
         ui.horizontal(|ui| {
             for choice in VizStyle::ALL {
-                ui.selectable_value(&mut cfg.style, choice, choice.title());
+                // picking a style also switches the visualizer back on
+                let selected = cfg.style == choice && (cfg.shown || full);
+                if ui.selectable_label(selected, choice.title()).clicked() {
+                    cfg.style = choice;
+                    cfg.shown = true;
+                }
+            }
+            if !full && ui.selectable_label(!cfg.shown, "Off").clicked() {
+                cfg.shown = false;
             }
         });
         if full {
@@ -306,10 +314,6 @@ impl Skratch {
             ui.checkbox(&mut cfg.record, "Spinning record");
         } else {
             ui.checkbox(&mut cfg.behind_lists, "Show behind Up next and Library");
-            ui.checkbox(
-                &mut cfg.fill_when_no_lyrics,
-                "Fill the lyrics panel when a track has none",
-            );
         }
         ui.checkbox(&mut cfg.peak_caps, "Falling peak caps");
         ui.checkbox(&mut cfg.reflection, "Reflection (bars)");
@@ -521,8 +525,13 @@ impl Skratch {
             .on_hover_text("Fill the window with the visualizer. Esc leaves.")
             .clicked()
         {
-            self.viz.full = true;
-            self.viz.moved_at = ui.input(|i| i.time);
+            self.viz_enter_full(ui.input(|i| i.time));
         }
+    }
+
+    /// Fills the window with the visualizer.
+    pub(super) fn viz_enter_full(&mut self, now: f64) {
+        self.viz.full = true;
+        self.viz.moved_at = now;
     }
 }
