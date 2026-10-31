@@ -273,6 +273,10 @@ impl Skratch {
             &mut cfg.lyrics,
             if full { "Lyrics" } else { "Lyrics over it" },
         );
+        ui.checkbox(
+            &mut self.state.lyric_style.shadow,
+            "Soft shadow behind lyrics",
+        );
         if full {
             ui.add_enabled_ui(cfg.lyrics, |ui| {
                 ui.horizontal(|ui| {

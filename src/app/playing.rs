@@ -281,6 +281,7 @@ impl Skratch {
         );
         ui.checkbox(&mut style.animate, "Animate effects");
         ui.checkbox(&mut style.sweep, "Fill the sung line as it goes");
+        ui.checkbox(&mut style.shadow, "Soft shadow behind the text");
         ui.horizontal(|ui| {
             ui.label("Rhymes");
             for (shown, name) in [

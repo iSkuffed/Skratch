@@ -340,6 +340,23 @@ pub fn draw_line(
                 at += Vec2::new(jitter(0), jitter(8));
             }
         }
+        // a halo: four faint dark copies just behind the text, nothing for lines that are fading out
+        if style.shadow && fade > 0.15 {
+            let r = (piece.size * 0.05).clamp(1.0, 2.0);
+            for (dx, dy) in [(-r, -r), (r, -r), (-r, r), (r, r)] {
+                let mut halo = egui::epaint::TextShape::new(
+                    at + Vec2::new(dx, dy),
+                    piece.galley.clone(),
+                    Color32::BLACK,
+                );
+                halo.override_text_color = Some(Color32::from_black_alpha(90));
+                let mut halo = egui::Shape::Text(halo);
+                if let Some(grow) = grow {
+                    halo.transform(grow);
+                }
+                painter.add(halo);
+            }
+        }
         let mut shape = egui::Shape::galley(at, piece.galley.clone(), Color32::WHITE);
         if let Some(grow) = grow {
             shape.transform(grow);

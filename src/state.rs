@@ -163,6 +163,8 @@ pub struct LyricStyle {
     pub rhymes: RhymeShow,
     /// The line being sung fills with the accent colour as it goes.
     pub sweep: bool,
+    /// A faint dark halo behind the text, so it reads over bright covers and moving bars.
+    pub shadow: bool,
 }
 
 impl Default for LyricStyle {
@@ -175,6 +177,7 @@ impl Default for LyricStyle {
             animate: true,
             rhymes: RhymeShow::All,
             sweep: true,
+            shadow: true,
         }
     }
 }
