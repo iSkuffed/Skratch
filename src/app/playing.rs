@@ -22,6 +22,9 @@ const DRAWER_LINGER: f64 = 1.2;
 /// Half the side of the square the settings gear reacts to the pointer in.
 const GEAR_HALF: f32 = 14.0;
 
+/// How wide the pull tab holding the gear is.
+const TAB_W: f32 = 38.0;
+
 /// How long the animation when the panel changes tab takes, in seconds.
 const REVEAL_SECONDS: f64 = 0.32;
 
@@ -108,15 +111,18 @@ struct GearRow {
     right: f32,
 }
 
-/// Where the settings drawer and its gear go on a page `edge` wide. The gear is the drawer's
-/// pull tab: it sits at the end of the tab row, and stands at the drawer's left edge, on the
-/// same row, once the drawer is out.
+/// Where the settings drawer and its gear go on a page `edge` wide. The gear sits on a small
+/// pull tab that is part of the drawer: at the end of the tab row while the drawer is put away,
+/// and against the drawer's left edge, on the same row, once it is out.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct DrawerLayout {
     /// Clicks here miss what is under the drawer.
     block: Rect,
     /// The dark backing.
     backing: Rect,
+    /// The pull tab the gear sits in, and which of its corners are rounded.
+    tab: Rect,
+    tab_round: egui::CornerRadius,
     /// Where the options are drawn.
     content: Rect,
     /// Where the pointer counts as on the open drawer: all of it, and the tab row beside it.
@@ -129,33 +135,51 @@ struct DrawerLayout {
 impl DrawerLayout {
     fn new(edge: Rect, row: GearRow) -> Self {
         let y = row.tabs.center().y;
-        let top = row.tabs.bottom().max(y + GEAR_HALF);
+        let row_top = row.tabs.top().min(y - GEAR_HALF);
+        let row_bottom = row.tabs.bottom().max(y + GEAR_HALF);
         let width = (edge.width() * 0.5).clamp(300.0, 540.0).min(edge.width());
+        let left = edge.right() - width;
         let inner = (width * 0.62).max(240.0).min(width - 24.0);
         let content = Rect::from_min_max(
-            pos2(edge.right() - 24.0 - inner, top + 14.0),
+            pos2(edge.right() - 24.0 - inner, row_bottom + 14.0),
             pos2(edge.right() - 24.0, edge.bottom() - 14.0),
         );
         let gear_in = pos2(row.right - GEAR_HALF, y);
-        // never on top of the tabs, however narrow the window is
-        let gear_out = pos2(
-            (content.left() + 9.0)
-                .max(row.tabs.right() + 24.0)
-                .min(gear_in.x),
-            y,
-        );
+        // The tab hangs off the drawer's left edge, on the tab row, when the tabs leave room for
+        // it. When they do not (a narrow panel), the drawer starts below the row and the tab
+        // stands on top of it, just past the tabs, so it never covers them.
+        let (tab, top, tab_round) = if left - TAB_W - 12.0 >= row.tabs.right() {
+            let round = egui::CornerRadius {
+                nw: 10,
+                sw: 10,
+                ne: 0,
+                se: 0,
+            };
+            let tab = Rect::from_min_max(pos2(left - TAB_W, row_top), pos2(left, row_bottom));
+            (tab, row_top, round)
+        } else {
+            let x = (row.tabs.right() + 12.0).min(edge.right() - TAB_W - 24.0);
+            let round = egui::CornerRadius {
+                nw: 10,
+                ne: 10,
+                sw: 0,
+                se: 0,
+            };
+            let tab = Rect::from_min_max(pos2(x, row_top), pos2(x + TAB_W, row_bottom));
+            (tab, row_bottom, round)
+        };
+        let gear_out = pos2(tab.center().x.min(gear_in.x), y);
         // the pointer counts as on the drawer from where it has become visibly dark
         let block = Rect::from_min_max(pos2(edge.right() - width * 0.8, top), edge.right_bottom());
         let near = Rect::from_min_max(
-            pos2(
-                block.left().min(gear_out.x - GEAR_HALF - 4.0),
-                y - GEAR_HALF,
-            ),
+            pos2(block.left().min(tab.left() - 4.0), row_top),
             edge.right_bottom(),
         );
         Self {
             block,
-            backing: Rect::from_min_max(pos2(edge.right() - width, top), edge.right_bottom()),
+            backing: Rect::from_min_max(pos2(left, top), edge.right_bottom()),
+            tab,
+            tab_round,
             content,
             near,
             gear_in,
@@ -509,27 +533,35 @@ impl Skratch {
             f32::from(self.drawer.open)
         };
         self.drawer.out = out;
-        if gear {
-            let colour = if self.drawer.open || over {
-                style::CREAM
-            } else {
-                style::CREAM_DIM
-            };
-            style::gear(ui.painter(), layout.gear_at(out), 9.0, colour);
-        }
+        let colour = if self.drawer.open || over {
+            style::CREAM
+        } else {
+            style::CREAM_DIM
+        };
         if out <= 0.0 {
+            if gear {
+                style::gear(ui.painter(), layout.gear_at(out), 9.0, colour);
+            }
             return;
         }
         let shift = layout.shift(out);
         let acted = egui::Area::new(id.with("area"))
             .order(egui::Order::Foreground)
-            .fixed_pos(layout.block.min + shift)
+            .fixed_pos(layout.block.union(layout.tab).min + shift)
             .constrain(false)
             .show(&ctx, |ui| {
                 ui.set_opacity(out);
                 // the whole strip belongs to the drawer, so clicks on it miss what is beneath
                 ui.allocate_rect(layout.block.translate(shift), Sense::hover());
+                ui.allocate_rect(layout.tab.translate(shift), Sense::hover());
                 style::drawer_backing(ui.painter(), layout.backing.translate(shift), 28.0);
+                style::drawer_tab(ui.painter(), layout.tab.translate(shift), layout.tab_round);
+                if gear {
+                    // the gear stays fully there while the drawer fades in around it
+                    let mut painter = ui.painter().clone();
+                    painter.set_opacity(1.0);
+                    style::gear(&painter, layout.gear_at(out), 9.0, colour);
+                }
                 ui.scope_builder(
                     egui::UiBuilder::new().max_rect(layout.content.translate(shift)),
                     |ui| {
@@ -1219,7 +1251,11 @@ mod tests {
         assert_eq!(wide.gear_in, pos2(1862.0, 74.0));
         assert_eq!(wide.gear_out.y, wide.gear_in.y);
         assert!(wide.gear_out.x > 1220.0 && wide.gear_out.x < wide.gear_in.x);
-        assert!((wide.gear_out.x - wide.content.left()).abs() < 12.0);
+        // the gear sits in a tab that hangs off the drawer's left edge, on the tab row
+        assert_eq!(wide.tab.right(), wide.backing.left());
+        assert_eq!(wide.gear_out, wide.tab.center());
+        assert!(wide.tab.left() > 1220.0);
+        assert_eq!(wide.backing.top(), wide.tab.top());
         // the drawer slides exactly as far as the gear has to go
         assert_eq!(wide.shift(0.0).x, wide.gear_in.x - wide.gear_out.x);
         assert_eq!(wide.shift(1.0), Vec2::ZERO);
@@ -1251,6 +1287,9 @@ mod tests {
         assert!(layout.gear_in.x - GEAR_HALF >= 333.0);
         assert!(layout.gear_out.x - GEAR_HALF >= 333.0);
         assert!(layout.gear_out.x < layout.gear_in.x);
+        // here the drawer starts under the row and the tab stands on top of it, past the tabs
+        assert!(layout.tab.left() > 333.0 && layout.tab.right() <= 464.0);
+        assert_eq!(layout.tab.bottom(), layout.backing.top());
     }
 
     #[test]

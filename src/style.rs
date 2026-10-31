@@ -846,6 +846,13 @@ pub fn drawer_backing(p: &Painter, rect: Rect, soft_top: f32) {
     p.add(Shape::mesh(mesh));
 }
 
+/// The settings drawer's pull tab: a small dark plate for the gear, about as dark as the
+/// drawer is at its right edge. `round` leaves the corners that join the drawer square.
+pub fn drawer_tab(p: &Painter, rect: Rect, round: CornerRadius) {
+    let alpha = (drawer_alpha(0.55) * 255.0) as u8;
+    p.rect_filled(rect, round, Color32::from_rgba_unmultiplied(8, 7, 6, alpha));
+}
+
 /// How much of a list's dark backing is left `t` of the way down it (0 top, 1 bottom): all of
 /// it over the first quarter, then easing out to nothing at the end of the list.
 pub fn scrim_alpha(t: f32) -> f32 {

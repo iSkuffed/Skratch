@@ -949,176 +949,190 @@ impl Skratch {
             .width_range(190.0..=300.0)
             .frame(frame)
             .show_inside(ui, |ui| {
-                ui.add_space(8.0);
-                section(ui, "BROWSE", false);
-                for view in [
-                    View::Tracks,
-                    View::Albums,
-                    View::Artists,
-                    View::Queue,
-                    View::Playing,
-                    View::Downloads,
-                ] {
-                    if ui
-                        .selectable_label(
-                            self.view == view,
-                            RichText::new(format!("{}  {}", view.icon(), view.title())).size(16.0),
-                        )
-                        .clicked()
-                    {
-                        self.view = view;
-                        self.selected_group = None;
-                        self.selected.clear();
-                        self.rebuild();
-                    }
-                }
-                section(ui, "PLAYLISTS", true);
-                let names: Vec<String> = self.state.playlists.iter().map(|p| p.name.clone()).collect();
-                for (i, name) in names.iter().enumerate() {
-                    let name = display(name, "Untitled playlist");
-                    if ui
-                        .selectable_label(
-                            self.view == View::Playlist(i),
-                            RichText::new(format!("{}  {name}", View::Playlist(i).icon())).size(16.0),
-                        )
-                        .clicked()
-                    {
-                        self.view = View::Playlist(i);
-                        self.selected_group = None;
-                        self.selected.clear();
-                        self.rebuild();
-                    }
-                }
-                if ui.small_button("+ New playlist").clicked() {
-                    self.state.playlists.push(Playlist {
-                        name: "New playlist".into(),
-                        ids: Vec::new(),
-                    });
-                    self.view = View::Playlist(self.state.playlists.len() - 1);
-                    self.selected.clear();
-                    self.rebuild();
-                }
-                section(ui, "MUSIC FOLDERS", true);
-                let mut remove = None;
+                // a short window or screen would otherwise cut the lower entries off
                 egui::ScrollArea::vertical()
-                    .id_salt("sources")
-                    .max_height(180.0)
-                    .show(ui, |ui| {
-                        for path in &self.sources {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    path.file_name()
-                                        .unwrap_or(path.as_os_str())
-                                        .to_string_lossy(),
-                                )
-                                .on_hover_text(path.display().to_string());
-                                if ui
-                                    .small_button("x")
-                                    .on_hover_text("Remove source from library. Files are kept.")
-                                    .clicked()
-                                {
-                                    remove = Some(path.clone());
-                                }
-                            });
+                    .id_salt("sidebar-scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.sidebar_entries(ui));
+            });
+    }
+
+    fn sidebar_entries(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        section(ui, "BROWSE", false);
+        for view in [
+            View::Tracks,
+            View::Albums,
+            View::Artists,
+            View::Queue,
+            View::Playing,
+            View::Downloads,
+        ] {
+            if ui
+                .selectable_label(
+                    self.view == view,
+                    RichText::new(format!("{}  {}", view.icon(), view.title())).size(16.0),
+                )
+                .clicked()
+            {
+                self.view = view;
+                self.selected_group = None;
+                self.selected.clear();
+                self.rebuild();
+            }
+        }
+        section(ui, "PLAYLISTS", true);
+        let names: Vec<String> = self
+            .state
+            .playlists
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        for (i, name) in names.iter().enumerate() {
+            let name = display(name, "Untitled playlist");
+            if ui
+                .selectable_label(
+                    self.view == View::Playlist(i),
+                    RichText::new(format!("{}  {name}", View::Playlist(i).icon())).size(16.0),
+                )
+                .clicked()
+            {
+                self.view = View::Playlist(i);
+                self.selected_group = None;
+                self.selected.clear();
+                self.rebuild();
+            }
+        }
+        if ui.small_button("+ New playlist").clicked() {
+            self.state.playlists.push(Playlist {
+                name: "New playlist".into(),
+                ids: Vec::new(),
+            });
+            self.view = View::Playlist(self.state.playlists.len() - 1);
+            self.selected.clear();
+            self.rebuild();
+        }
+        section(ui, "MUSIC FOLDERS", true);
+        let mut remove = None;
+        egui::ScrollArea::vertical()
+            .id_salt("sources")
+            .max_height(180.0)
+            .show(ui, |ui| {
+                for path in &self.sources {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            path.file_name()
+                                .unwrap_or(path.as_os_str())
+                                .to_string_lossy(),
+                        )
+                        .on_hover_text(path.display().to_string());
+                        if ui
+                            .small_button("x")
+                            .on_hover_text("Remove source from library. Files are kept.")
+                            .clicked()
+                        {
+                            remove = Some(path.clone());
                         }
                     });
-                if let Some(path) = remove {
-                    self.command(Command::Remove(path));
-                }
-                if ui
-                    .add_enabled(
-                        self.folder_rx.is_none(),
-                        egui::Button::new("+ Choose folder"),
-                    )
-                    .clicked()
-                {
-                    self.pick_folder();
-                }
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.source_text)
-                        .hint_text("Or paste an absolute path")
-                        .desired_width(f32::INFINITY),
-                );
-                if ui
-                    .add_enabled(
-                        !self.source_text.trim().is_empty(),
-                        egui::Button::new("Add path"),
-                    )
-                    .clicked()
-                {
-                    let path = PathBuf::from(self.source_text.trim());
-                    self.command(Command::Add(path));
-                    self.source_text.clear();
-                }
-                section(ui, "LIBRARY", true);
-                ui.label(
-                    RichText::new(format!("{} tracks", self.tracks.len())).color(style::CREAM),
-                );
-                // Quick background rescans would otherwise flash the spinner and shift the layout.
-                let busy_delay = std::time::Duration::from_millis(300);
-                let slow = self.busy_since.is_some_and(|t| t.elapsed() > busy_delay);
-                if self.busy && !slow {
-                    ui.ctx().request_repaint_after(busy_delay);
-                }
-                if slow {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Updating library...");
-                    });
-                }
-                if ui
-                    .add_enabled(!slow, egui::Button::new("Refresh library"))
-                    .clicked()
-                {
-                    self.command(Command::Refresh);
-                }
-                ui.label(
-                    RichText::new("Folders update automatically.")
-                        .small()
-                        .weak(),
-                );
-                section(ui, "SETTINGS", true);
-                ui.checkbox(&mut self.state.double_click, "Double-click to play")
-                    .on_hover_text("Off: a single click starts a track.");
-                ui.checkbox(&mut self.state.lyrics_online, "Look up lyrics online")
-                    .on_hover_text("Missing lyrics are fetched from lrclib.net, which is sent the artist, title, album and length.");
-                let mut fallback = !self.state.lyrics_no_fallback;
-                ui.add_enabled(
-                    self.state.lyrics_online,
-                    egui::Checkbox::new(&mut fallback, "Also try NetEase Cloud Music"),
-                )
-                .on_hover_text("When lrclib.net has nothing or is down, music.163.com is asked with the artist, title and length.");
-                self.state.lyrics_no_fallback = !fallback;
-                ui.collapsing("Effects", |ui| {
-                    let effects = &mut self.state.effects;
-                    ui.checkbox(&mut effects.animations, "Animations")
-                        .on_hover_text("Master switch for everything below.");
-                    ui.add_enabled_ui(effects.animations, |ui| {
-                        ui.checkbox(&mut effects.needle, "Moving tonearm")
-                            .on_hover_text("It drops with a bounce, creeps inward as the song plays and lifts while you seek.");
-                        ui.checkbox(&mut effects.scratch, "Scratch the record")
-                            .on_hover_text("Dragging the seek bar turns the record.");
-                        ui.checkbox(&mut effects.seek_life, "Lively seek bar")
-                            .on_hover_text("Playhead glow, bars that follow the bass, and the time under the pointer.");
-                        ui.checkbox(&mut effects.transitions, "Transitions")
-                            .on_hover_text("Pages and the Now playing views fade in, cards rise in, covers crossfade and play/pause morphs.");
-                    });
-                });
-                ui.collapsing("Look", |ui| {
-                    let look = &mut self.state.look;
-                    ui.checkbox(&mut look.mood, "Tint with the cover")
-                        .on_hover_text("Panels and the page background take a little of the playing cover's colour.");
-                    ui.checkbox(&mut look.depth, "Shadows and edges")
-                        .on_hover_text("Soft shadows under covers and a light edge on the player bar.");
-                    ui.checkbox(&mut look.grain, "Film grain")
-                        .on_hover_text("A faint noise over everything; it hides banding in dark gradients.");
-                    ui.checkbox(&mut look.fonts, "DM Sans and DM Serif")
-                        .on_hover_text("Off: egui's default typeface.");
-                });
-                if ui.button("Run setup again").clicked() {
-                    self.open_setup(false);
                 }
             });
+        if let Some(path) = remove {
+            self.command(Command::Remove(path));
+        }
+        if ui
+            .add_enabled(
+                self.folder_rx.is_none(),
+                egui::Button::new("+ Choose folder"),
+            )
+            .clicked()
+        {
+            self.pick_folder();
+        }
+        ui.add(
+            egui::TextEdit::singleline(&mut self.source_text)
+                .hint_text("Or paste an absolute path")
+                .desired_width(f32::INFINITY),
+        );
+        if ui
+            .add_enabled(
+                !self.source_text.trim().is_empty(),
+                egui::Button::new("Add path"),
+            )
+            .clicked()
+        {
+            let path = PathBuf::from(self.source_text.trim());
+            self.command(Command::Add(path));
+            self.source_text.clear();
+        }
+        section(ui, "LIBRARY", true);
+        ui.label(RichText::new(format!("{} tracks", self.tracks.len())).color(style::CREAM));
+        // Quick background rescans would otherwise flash the spinner and shift the layout.
+        let busy_delay = std::time::Duration::from_millis(300);
+        let slow = self.busy_since.is_some_and(|t| t.elapsed() > busy_delay);
+        if self.busy && !slow {
+            ui.ctx().request_repaint_after(busy_delay);
+        }
+        if slow {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Updating library...");
+            });
+        }
+        if ui
+            .add_enabled(!slow, egui::Button::new("Refresh library"))
+            .clicked()
+        {
+            self.command(Command::Refresh);
+        }
+        ui.label(
+            RichText::new("Folders update automatically.")
+                .small()
+                .weak(),
+        );
+        section(ui, "SETTINGS", true);
+        ui.checkbox(&mut self.state.double_click, "Double-click to play")
+            .on_hover_text("Off: a single click starts a track.");
+        ui.checkbox(&mut self.state.lyrics_online, "Look up lyrics online")
+            .on_hover_text("Missing lyrics are fetched from lrclib.net, which is sent the artist, title, album and length.");
+        let mut fallback = !self.state.lyrics_no_fallback;
+        ui.add_enabled(
+            self.state.lyrics_online,
+            egui::Checkbox::new(&mut fallback, "Also try NetEase Cloud Music"),
+        )
+        .on_hover_text("When lrclib.net has nothing or is down, music.163.com is asked with the artist, title and length.");
+        self.state.lyrics_no_fallback = !fallback;
+        ui.collapsing("Effects", |ui| {
+            let effects = &mut self.state.effects;
+            ui.checkbox(&mut effects.animations, "Animations")
+                .on_hover_text("Master switch for everything below.");
+            ui.add_enabled_ui(effects.animations, |ui| {
+                ui.checkbox(&mut effects.needle, "Moving tonearm")
+                    .on_hover_text("It drops with a bounce, creeps inward as the song plays and lifts while you seek.");
+                ui.checkbox(&mut effects.scratch, "Scratch the record")
+                    .on_hover_text("Dragging the seek bar turns the record.");
+                ui.checkbox(&mut effects.seek_life, "Lively seek bar")
+                    .on_hover_text("Playhead glow, bars that follow the bass, and the time under the pointer.");
+                ui.checkbox(&mut effects.transitions, "Transitions")
+                    .on_hover_text("Pages and the Now playing views fade in, cards rise in, covers crossfade and play/pause morphs.");
+            });
+        });
+        ui.collapsing("Look", |ui| {
+            let look = &mut self.state.look;
+            ui.checkbox(&mut look.mood, "Tint with the cover")
+                .on_hover_text(
+                    "Panels and the page background take a little of the playing cover's colour.",
+                );
+            ui.checkbox(&mut look.depth, "Shadows and edges")
+                .on_hover_text("Soft shadows under covers and a light edge on the player bar.");
+            ui.checkbox(&mut look.grain, "Film grain").on_hover_text(
+                "A faint noise over everything; it hides banding in dark gradients.",
+            );
+            ui.checkbox(&mut look.fonts, "DM Sans and DM Serif")
+                .on_hover_text("Off: egui's default typeface.");
+        });
+        if ui.button("Run setup again").clicked() {
+            self.open_setup(false);
+        }
     }
 
     /// Eases the record, tonearm and accent colour towards their targets for this frame.
