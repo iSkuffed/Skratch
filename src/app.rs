@@ -1044,6 +1044,13 @@ impl Skratch {
                     .on_hover_text("Off: a single click starts a track.");
                 ui.checkbox(&mut self.state.lyrics_online, "Look up lyrics online")
                     .on_hover_text("Missing lyrics are fetched from lrclib.net, which is sent the artist, title, album and length.");
+                let mut fallback = !self.state.lyrics_no_fallback;
+                ui.add_enabled(
+                    self.state.lyrics_online,
+                    egui::Checkbox::new(&mut fallback, "Also try NetEase Cloud Music"),
+                )
+                .on_hover_text("When lrclib.net has nothing or is down, music.163.com is asked with the artist, title and length.");
+                self.state.lyrics_no_fallback = !fallback;
                 ui.collapsing("Effects", |ui| {
                     let effects = &mut self.state.effects;
                     ui.checkbox(&mut effects.animations, "Animations")

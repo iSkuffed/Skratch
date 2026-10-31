@@ -1,5 +1,6 @@
 //! Lyrics for the Now playing panel. Looked up in order: a `.lrc` file next to the track,
-//! lyrics in the file's own tags, a local cache, and (only when the user allows it) LRCLIB.
+//! lyrics in the file's own tags, a local cache, and (only when the user allows it) LRCLIB,
+//! then NetEase Cloud Music as a fallback when LRCLIB has nothing or is down.
 use crate::{model::Track, online, tagparse};
 use anyhow::Result;
 use eframe::egui;
@@ -169,6 +170,85 @@ fn lrclib(track: &Track) -> Result<Option<Lyrics>> {
     Ok(pick(&found, track.duration))
 }
 
+/// NetEase song ids worth fetching lyrics for: about as long as the file and by the same
+/// artist (when the track has one), best match first.
+fn netease_ids(results: &Value, duration: f64, artist: &str) -> Vec<u64> {
+    let artist = artist.trim().to_lowercase();
+    let by_artist = |song: &Value| {
+        artist.is_empty()
+            || song["artists"].as_array().is_some_and(|names| {
+                names.iter().filter_map(|a| a["name"].as_str()).any(|name| {
+                    let name = name.trim().to_lowercase();
+                    !name.is_empty() && (artist.contains(&name) || name.contains(&artist))
+                })
+            })
+    };
+    let close = |song: &Value| {
+        duration <= 0.0
+            || song["duration"]
+                .as_f64()
+                .is_some_and(|ms| (ms / 1000.0 - duration).abs() <= 5.0)
+    };
+    results["result"]["songs"]
+        .as_array()
+        .map(|songs| {
+            songs
+                .iter()
+                .filter(|song| close(song) && by_artist(song))
+                .filter_map(|song| song["id"].as_u64())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// NetEase puts credits (`作词 : ...`) in the first lines; they are not lyrics.
+fn without_credits(lrc: &str) -> String {
+    const CREDITS: [&str; 8] = [
+        "作词", "作曲", "编曲", "制作", "混音", "母带", "录音", "监制",
+    ];
+    lrc.lines()
+        .filter(|line| {
+            let text = line.rsplit(']').next().unwrap_or(line).trim();
+            !CREDITS.iter().any(|c| {
+                text.strip_prefix(c)
+                    .is_some_and(|rest| rest.trim_start().starts_with([':', '：']))
+            })
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// NetEase Cloud Music's public search and lyric endpoints. Unofficial and liable to change,
+/// so callers treat a failure here as "this source did not answer", never as fatal.
+fn netease(track: &Track) -> Result<Option<Lyrics>> {
+    let q = format!(
+        "{} {}",
+        track.artist.trim(),
+        tagparse::strip_noise(&track.title)
+    );
+    let found = online::get_json(
+        "https://music.163.com/api/search/get",
+        &[("s", q.trim()), ("type", "1"), ("limit", "10")],
+    )?;
+    for id in netease_ids(&found, track.duration, &track.artist)
+        .into_iter()
+        .take(3)
+    {
+        let id = id.to_string();
+        let answer = online::get_json(
+            "https://music.163.com/api/song/lyric",
+            &[("id", &id), ("lv", "1"), ("kv", "1"), ("tv", "-1")],
+        )?;
+        if let Some(lyrics) = answer["lrc"]["lyric"]
+            .as_str()
+            .and_then(|lrc| Lyrics::from_text(&without_credits(lrc)))
+        {
+            return Ok(Some(lyrics));
+        }
+    }
+    Ok(None)
+}
+
 fn embedded(path: &Path) -> Option<Lyrics> {
     let file = lofty::read_from_path(path).ok()?;
     let tag = file.primary_tag().or_else(|| file.first_tag())?;
@@ -210,7 +290,32 @@ pub fn has_user_version(dir: &Path, track: &Track) -> bool {
     user_file(dir, track).exists()
 }
 
-fn find(track: &Track, dir: &Path, online: bool) -> Result<Option<Lyrics>> {
+/// Keeps an online answer (or the lack of one) so the next play needs no network.
+fn remember(dir: &Path, track: &Track, lyrics: Option<&Lyrics>) {
+    let (synced, plain) = match lyrics {
+        Some(l @ Lyrics::Synced(_)) => (Some(l.to_text()), None),
+        Some(Lyrics::Plain(text)) => (None, Some(text.clone())),
+        None => (None, None),
+    };
+    // a failed cache write only costs a repeat lookup next time
+    let _ = fs::create_dir_all(dir).and_then(|()| {
+        fs::write(
+            cache_file(dir, track),
+            json!({"synced": synced, "plain": plain}).to_string(),
+        )
+    });
+}
+
+/// Which online lyric services may be asked.
+#[derive(Clone, Copy, Default)]
+pub struct Online {
+    /// "Look up lyrics online": nothing is sent anywhere without it.
+    pub allowed: bool,
+    /// Also ask NetEase when LRCLIB has nothing, and when trying another source.
+    pub fallback: bool,
+}
+
+fn find(track: &Track, dir: &Path, online: Online) -> Result<Option<Lyrics>> {
     if let Ok(text) = fs::read_to_string(user_file(dir, track)) {
         return Ok(Lyrics::from_text(&text));
     }
@@ -238,23 +343,55 @@ fn find(track: &Track, dir: &Path, online: bool) -> Result<Option<Lyrics>> {
             return Ok(None);
         }
     }
-    if !online {
+    if !online.allowed {
         return Ok(None);
     }
-    let lyrics = lrclib(track)?;
-    let (synced, plain) = match &lyrics {
-        Some(l @ Lyrics::Synced(_)) => (Some(l.to_text()), None),
-        Some(Lyrics::Plain(text)) => (None, Some(text.clone())),
-        None => (None, None),
-    };
-    // a failed cache write only costs a repeat lookup next time
-    let _ = fs::create_dir_all(dir).and_then(|()| {
-        fs::write(
-            &cache,
-            json!({"synced": synced, "plain": plain}).to_string(),
-        )
-    });
+    let primary = lrclib(track);
+    let mut lyrics = primary.as_ref().ok().cloned().flatten();
+    // "nothing" is only remembered when every source we asked actually answered
+    let mut complete = primary.is_ok();
+    if lyrics.is_none() && online.fallback {
+        match netease(track) {
+            Ok(found) => lyrics = found,
+            Err(_) => complete = false,
+        }
+    }
+    if let (None, Err(error)) = (&lyrics, primary) {
+        return Err(error);
+    }
+    if lyrics.is_none() && !complete {
+        return Ok(None);
+    }
+    remember(dir, track, lyrics.as_ref());
     Ok(lyrics)
+}
+
+/// The first online lyrics that differ from `current`, preferring synced ones. `Err` only
+/// when no source could be reached at all.
+fn other_source(track: &Track, current: Option<&Lyrics>) -> Result<Option<Lyrics>> {
+    let mut found = Vec::new();
+    let mut errors = Vec::new();
+    let mut answered = 0;
+    for answer in [lrclib(track), netease(track)] {
+        match answer {
+            Ok(lyrics) => {
+                answered += 1;
+                found.extend(lyrics.filter(|l| current != Some(l)));
+            }
+            Err(error) => errors.push(error),
+        }
+    }
+    let best = found
+        .iter()
+        .position(|l| matches!(l, Lyrics::Synced(_)))
+        .unwrap_or(0);
+    if !found.is_empty() {
+        return Ok(Some(found.swap_remove(best)));
+    }
+    match errors.into_iter().next() {
+        Some(error) if answered == 0 => Err(error),
+        _ => Ok(None),
+    }
 }
 
 pub enum Status {
@@ -280,6 +417,20 @@ pub struct Lookup {
     pub marks: Option<Vec<Vec<crate::rhyme::Mark>>>,
     /// A `.lrc`/`.txt` file the user is choosing to import.
     pub picking: Option<Receiver<String>>,
+    /// "Try another source" in flight: the track, and whether it found different lyrics.
+    other: (Sender<Other>, Receiver<Other>),
+    pub other_state: OtherState,
+}
+
+type Other = (PathBuf, Result<Option<Lyrics>>);
+
+/// Where "Try another source" stands, for the menu to show.
+#[derive(Clone, PartialEq)]
+pub enum OtherState {
+    Idle,
+    Searching,
+    /// Nothing different turned up (or no source could be reached); the lyrics were left alone.
+    NothingElse(String),
 }
 
 impl Default for Lookup {
@@ -295,6 +446,8 @@ impl Default for Lookup {
             editing: None,
             marks: None,
             picking: None,
+            other: mpsc::channel(),
+            other_state: OtherState::Idle,
         }
     }
 }
@@ -302,17 +455,36 @@ impl Default for Lookup {
 impl Lookup {
     /// Starts a lookup for `track` if it changed (or `online` was just allowed and the first
     /// answer was "nothing"), and collects a finished one into `status`.
-    pub fn update(&mut self, ctx: &egui::Context, track: &Track, dir: &Path, online: bool) {
+    pub fn update(&mut self, ctx: &egui::Context, track: &Track, dir: &Path, online: Online) {
         let changed = self.track.as_deref() != Some(track.path.as_path());
-        let allowed_now = online && !self.asked_online && matches!(self.status, Status::Missing);
+        let allowed_now =
+            online.allowed && !self.asked_online && matches!(self.status, Status::Missing);
         if changed || allowed_now {
             self.track = Some(track.path.clone());
-            self.asked_online = online;
+            self.asked_online = online.allowed;
+            self.other_state = OtherState::Idle;
             self.status = Status::Loading;
             self.scrolled = None;
             self.editing = None;
             self.marks = None;
             self.spawn(ctx, track.clone(), dir.to_path_buf(), online);
+        }
+        while let Ok((path, result)) = self.other.1.try_recv() {
+            if self.track.as_deref() != Some(path.as_path()) {
+                continue;
+            }
+            self.other_state = match result {
+                Ok(Some(lyrics)) => {
+                    self.marks = None;
+                    self.scrolled = None;
+                    self.status = Status::Found(lyrics);
+                    OtherState::Idle
+                }
+                Ok(None) => OtherState::NothingElse("No other source had different lyrics.".into()),
+                Err(error) => {
+                    OtherState::NothingElse(format!("Could not reach a source: {error:#}"))
+                }
+            };
         }
         while let Ok((path, _, result)) = self.rx.try_recv() {
             if self.track.as_deref() == Some(path.as_path()) {
@@ -326,16 +498,44 @@ impl Lookup {
         }
     }
 
+    /// Asks every online source for this track and swaps in the first lyrics that differ from
+    /// the ones showing (synced ones first). When there are none, nothing changes.
+    pub fn try_another(&mut self, ctx: &egui::Context, track: &Track, dir: &Path) {
+        if self.other_state == OtherState::Searching {
+            return;
+        }
+        self.other_state = OtherState::Searching;
+        let current = match &self.status {
+            Status::Found(lyrics) => Some(lyrics.clone()),
+            _ => None,
+        };
+        let (tx, ctx) = (self.other.0.clone(), ctx.clone());
+        let (track, dir) = (track.clone(), dir.to_path_buf());
+        std::thread::spawn(move || {
+            let result = other_source(&track, current.as_ref());
+            if let Ok(Some(lyrics)) = &result {
+                // the user's own file would hide the new lyrics on the next play
+                if user_file(&dir, &track).exists() {
+                    let _ = save(&dir, &track, &lyrics.to_text());
+                } else {
+                    remember(&dir, &track, Some(lyrics));
+                }
+            }
+            let _ = tx.send((track.path, result));
+            ctx.request_repaint();
+        });
+    }
+
     /// Looks again, e.g. after a network failure.
     pub fn retry(&mut self) {
         self.track = None;
     }
 
-    fn spawn(&self, ctx: &egui::Context, track: Track, dir: PathBuf, online: bool) {
+    fn spawn(&self, ctx: &egui::Context, track: Track, dir: PathBuf, online: Online) {
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         std::thread::spawn(move || {
             let result = find(&track, &dir, online);
-            let _ = tx.send((track.path, online, result));
+            let _ = tx.send((track.path, online.allowed, result));
             ctx.request_repaint();
         });
     }
@@ -382,6 +582,26 @@ mod tests {
     }
 
     #[test]
+    fn netease_results_must_match_length_and_artist_and_drop_credits() {
+        let results = json!({"result": {"songs": [
+            {"id": 1, "duration": 400000, "artists": [{"name": "Daft Punk"}]},
+            {"id": 2, "duration": 181000, "artists": [{"name": "Someone Else"}]},
+            {"id": 3, "duration": 180500, "artists": [{"name": "Pharrell"}, {"name": "daft punk"}]},
+        ]}});
+        assert_eq!(netease_ids(&results, 180.0, "Daft Punk"), vec![3]);
+        assert_eq!(netease_ids(&results, 180.0, ""), vec![2, 3]);
+        assert_eq!(
+            netease_ids(&json!({"code": 200}), 180.0, "x"),
+            Vec::<u64>::new()
+        );
+        let lrc = "[00:00.000] 作词 : Someone\n[00:01.000] 作曲：Someone\n[00:05.000]Hello there";
+        assert_eq!(
+            Lyrics::from_text(&without_credits(lrc)),
+            Some(Lyrics::Synced(vec![(5.0, "Hello there".into())]))
+        );
+    }
+
+    #[test]
     fn stamping_a_line_replaces_its_old_stamp_and_moves_on() {
         let (text, next) = stamp_line("one\n[00:01.00]two\nthree", 6, 65.5);
         assert_eq!(text, "one\n[01:05.50]two\nthree");
@@ -403,14 +623,14 @@ mod tests {
         let cache = dir.path().join("cache");
         save(&cache, &track, "right words").unwrap();
         assert_eq!(
-            find(&track, &cache, false).unwrap(),
+            find(&track, &cache, Online::default()).unwrap(),
             Some(Lyrics::Plain("right words".into()))
         );
         save(&cache, &track, "").unwrap();
-        assert_eq!(find(&track, &cache, false).unwrap(), None);
+        assert_eq!(find(&track, &cache, Online::default()).unwrap(), None);
         restore(&cache, &track);
         assert_eq!(
-            find(&track, &cache, false).unwrap(),
+            find(&track, &cache, Online::default()).unwrap(),
             Some(Lyrics::Synced(vec![(5.0, "wrong".into())]))
         );
     }
@@ -426,7 +646,7 @@ mod tests {
             ..Track::default()
         };
         assert_eq!(
-            find(&track, &dir.path().join("cache"), false).unwrap(),
+            find(&track, &dir.path().join("cache"), Online::default()).unwrap(),
             Some(Lyrics::Synced(vec![(5.0, "hello".into())]))
         );
     }

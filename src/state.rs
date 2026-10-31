@@ -266,6 +266,9 @@ pub struct SavedState {
     pub now_panel: NowPanel,
     /// Missing lyrics may be looked up on lrclib.net; off until the user allows it.
     pub lyrics_online: bool,
+    /// Opts out of asking NetEase Cloud Music when lrclib.net has no lyrics (stored inverted
+    /// so that an old save, which lacks it, gets the fallback).
+    pub lyrics_no_fallback: bool,
     pub lyric_style: LyricStyle,
     pub effects: Effects,
     pub visualizer: Visualizer,
@@ -273,6 +276,14 @@ pub struct SavedState {
 }
 
 impl SavedState {
+    /// Which online lyric services may be asked, as set in the settings.
+    pub fn lyric_sources(&self) -> skratch::lyrics::Online {
+        skratch::lyrics::Online {
+            allowed: self.lyrics_online,
+            fallback: !self.lyrics_no_fallback,
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self {

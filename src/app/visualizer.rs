@@ -425,7 +425,7 @@ impl Skratch {
             return false;
         };
         self.lyrics
-            .update(ctx, &track, &dir, self.state.lyrics_online);
+            .update(ctx, &track, &dir, self.state.lyric_sources());
         matches!(self.lyrics.status, Status::Found(Lyrics::Synced(_)))
     }
 

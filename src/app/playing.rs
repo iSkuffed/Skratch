@@ -9,7 +9,7 @@ use eframe::egui::text::{CCursor, CCursorRange};
 use eframe::egui::{self, Align, RichText, Sense, pos2, vec2};
 use skratch::{
     lyricfx,
-    lyrics::{self, Lyrics, Status},
+    lyrics::{self, Lyrics, OtherState, Status},
     model::Track,
 };
 
@@ -179,7 +179,7 @@ impl Skratch {
                 // a track without lyrics gets the visualizer behind the "no lyrics" message
                 let dir = self.data_dir.join("lyrics");
                 self.lyrics
-                    .update(ui.ctx(), track, &dir, self.state.lyrics_online);
+                    .update(ui.ctx(), track, &dir, self.state.lyric_sources());
                 let none = matches!(self.lyrics.status, Status::Missing | Status::Failed(_));
                 if none
                     && self.lyrics.editing.is_none()
@@ -192,7 +192,7 @@ impl Skratch {
             NowPanel::Visualizer => {
                 let dir = self.data_dir.join("lyrics");
                 self.lyrics
-                    .update(ui.ctx(), track, &dir, self.state.lyrics_online);
+                    .update(ui.ctx(), track, &dir, self.state.lyric_sources());
                 let over = self.state.visualizer.lyrics
                     && matches!(self.lyrics.status, Status::Found(_))
                     && self.lyrics.editing.is_none();
@@ -252,6 +252,30 @@ impl Skratch {
         {
             self.save_lyrics(&dir, track, "");
             ui.close();
+        }
+        let online = self.state.lyric_sources();
+        let button = ui
+            .add_enabled(
+                online.allowed
+                    && online.fallback
+                    && self.lyrics.other_state != OtherState::Searching,
+                egui::Button::new("Try another source"),
+            )
+            .on_hover_text(
+                "Ask the other lyric services and switch to different lyrics if any turn up; \
+                 otherwise these stay as they are. Needs online lookup and the NetEase fallback.",
+            );
+        if button.clicked() {
+            self.lyrics.try_another(ui.ctx(), track, &dir);
+        }
+        match &self.lyrics.other_state {
+            OtherState::Idle => {}
+            OtherState::Searching => {
+                ui.label(RichText::new("Looking...").small().color(style::CREAM_DIM));
+            }
+            OtherState::NothingElse(note) => {
+                ui.label(RichText::new(note).small().color(style::CREAM_DIM));
+            }
         }
         ui.separator();
         self.lyric_style_menu(ui);
@@ -438,7 +462,7 @@ impl Skratch {
     fn lyrics(&mut self, ui: &mut egui::Ui, track: &skratch::model::Track) {
         let dir = self.data_dir.join("lyrics");
         self.lyrics
-            .update(ui.ctx(), track, &dir, self.state.lyrics_online);
+            .update(ui.ctx(), track, &dir, self.state.lyric_sources());
         let now = if self.playing {
             self.reactive.now()
         } else {
