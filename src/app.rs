@@ -2162,9 +2162,9 @@ impl Skratch {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let search = ui.add(egui::TextEdit::singleline(&mut self.search).id(SEARCH_ID.into()).hint_text("Search your music  (Ctrl+F)").desired_width(280.0));
                     if search.changed() { self.rebuild(); }
-                    if search.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    // egui drops focus on Escape before the widget is shown, so it is `lost_focus` here
+                    if search.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         self.search.clear();
-                        search.surrender_focus();
                         self.rebuild();
                     }
                 });

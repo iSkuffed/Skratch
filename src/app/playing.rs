@@ -306,6 +306,8 @@ impl Skratch {
     fn panel_ui(&mut self, ui: &mut egui::Ui, track: &Track, edge: Rect) {
         let panel = self.state.now_panel;
         let mut tabs = Rect::NOTHING;
+        // the gear rests at the panel's edge, past the tabs (the row's own rect stops at them)
+        let right = ui.available_rect_before_wrap().right();
         let header = ui.allocate_ui_with_layout(
             vec2(ui.available_width(), 28.0),
             egui::Layout::left_to_right(Align::Center),
@@ -341,7 +343,7 @@ impl Skratch {
                 pos2(tabs.left(), row.top()),
                 pos2(tabs.right(), row.bottom()),
             ),
-            right: row.right(),
+            right,
         };
         ui.add_space(4.0);
         let area = ui.available_rect_before_wrap();
@@ -1234,6 +1236,21 @@ mod tests {
         let edge = Rect::from_min_max(pos2(220.0, 50.0), pos2(1000.0, 880.0));
         let narrow = DrawerLayout::new(edge, row(950.0, 976.0));
         assert!(narrow.gear_out.x > 950.0 && narrow.gear_out.x <= narrow.gear_in.x);
+    }
+
+    #[test]
+    fn the_gear_has_room_to_pull_out_when_the_tabs_nearly_fill_a_narrow_panel() {
+        // a 464 px panel whose tabs run to x = 333: the gear rests past them, at the panel's
+        // edge, and comes out to just after them instead of sitting on the last tab
+        let edge = Rect::from_min_max(pos2(0.0, 0.0), pos2(464.0, 680.0));
+        let row = GearRow {
+            tabs: Rect::from_min_max(pos2(20.0, 8.0), pos2(333.0, 36.0)),
+            right: 464.0,
+        };
+        let layout = DrawerLayout::new(edge, row);
+        assert!(layout.gear_in.x - GEAR_HALF >= 333.0);
+        assert!(layout.gear_out.x - GEAR_HALF >= 333.0);
+        assert!(layout.gear_out.x < layout.gear_in.x);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! lyrics in the file's own tags, a local cache, and (only when the user allows it) LRCLIB,
 //! then NetEase Cloud Music as a fallback when LRCLIB has nothing or is down.
 use crate::{model::Track, online, tagparse};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use eframe::egui;
 use lofty::{prelude::*, tag::ItemKey};
 use serde_json::{Value, json};
@@ -10,12 +10,61 @@ use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, Sender},
-    time::{Duration, SystemTime},
+    sync::{
+        Mutex,
+        mpsc::{self, Receiver, Sender},
+    },
+    time::{Duration, Instant, SystemTime},
 };
 
 /// How long "LRCLIB has nothing" is believed before asking again.
 const MISS_TTL: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// How long a lyric service that failed to answer is left alone, so a service that is down does
+/// not make every track wait out its timeout. "Try again" and "Try another source" ignore it.
+const OUTAGE: Duration = Duration::from_secs(5 * 60);
+
+/// When each online service (LRCLIB, NetEase) last failed to answer, if it did.
+struct Outages {
+    failed: [Mutex<Option<Instant>>; 2],
+    hold: Duration,
+}
+
+static OUTAGES: Outages = Outages::new(OUTAGE);
+
+impl Outages {
+    const fn new(hold: Duration) -> Self {
+        Self {
+            failed: [const { Mutex::new(None) }; 2],
+            hold,
+        }
+    }
+
+    /// Runs `fetch` unless this service failed less than `hold` ago, in which case it says so
+    /// instead of waiting on it again.
+    fn ask<T>(&self, origin: Origin, fetch: impl FnOnce() -> Result<T>) -> Result<T> {
+        let mut failed = self.failed[usize::from(origin == Origin::NetEase)]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(left) = failed.and_then(|at| self.hold.checked_sub(at.elapsed())) {
+            bail!(
+                "it failed a moment ago, so it was not asked again (next try in {} min)",
+                left.as_secs().div_ceil(60)
+            );
+        }
+        let answer = fetch();
+        *failed = answer.is_err().then(Instant::now);
+        answer
+    }
+
+    fn forget(&self) {
+        for failed in &self.failed {
+            *failed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Lyrics {
@@ -428,14 +477,14 @@ fn find(track: &Track, dir: &Path, online: Online) -> Answer {
         return local(None, Origin::Earlier);
     }
     let mut notes = Notes::new();
-    let primary = lrclib(track);
+    let primary = OUTAGES.ask(Origin::Lrclib, || lrclib(track));
     note("LRCLIB", &primary, &mut notes);
     // "nothing" is only remembered when every source we asked actually answered
     let mut complete = primary.is_ok();
     let mut lyrics = primary.ok().flatten();
     let mut origin = Origin::Lrclib;
     if lyrics.is_none() && online.fallback {
-        let second = netease(track);
+        let second = OUTAGES.ask(Origin::NetEase, || netease(track));
         note("NetEase", &second, &mut notes);
         complete &= second.is_ok();
         lyrics = second.ok().flatten();
@@ -458,8 +507,14 @@ fn other_source(track: &Track, current: Option<&Lyrics>) -> Result<Option<(Lyric
     let mut errors = Vec::new();
     let mut answered = 0;
     for (origin, answer) in [
-        (Origin::Lrclib, lrclib(track)),
-        (Origin::NetEase, netease(track)),
+        (
+            Origin::Lrclib,
+            OUTAGES.ask(Origin::Lrclib, || lrclib(track)),
+        ),
+        (
+            Origin::NetEase,
+            OUTAGES.ask(Origin::NetEase, || netease(track)),
+        ),
     ] {
         match answer {
             Ok(lyrics) => {
@@ -599,6 +654,7 @@ impl Lookup {
             return;
         }
         self.other_state = OtherState::Searching;
+        OUTAGES.forget();
         let current = match &self.status {
             Status::Found(lyrics) => Some(lyrics.clone()),
             _ => None,
@@ -622,6 +678,7 @@ impl Lookup {
 
     /// Looks again, e.g. after a network failure.
     pub fn retry(&mut self) {
+        OUTAGES.forget();
         self.track = None;
     }
 
@@ -643,6 +700,33 @@ impl Lookup {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_service_that_failed_is_left_alone_for_a_while() {
+        use std::cell::Cell;
+        let outages = Outages::new(Duration::from_millis(60));
+        let asked = Cell::new(0);
+        let fail = || {
+            asked.set(asked.get() + 1);
+            Err::<(), _>(anyhow::anyhow!("down"))
+        };
+        assert!(outages.ask(Origin::Lrclib, fail).is_err());
+        // a second try right away is not made, but says why
+        let again = outages.ask(Origin::Lrclib, fail).unwrap_err().to_string();
+        assert_eq!(asked.get(), 1);
+        assert!(again.contains("failed a moment ago"), "{again}");
+        // the other service is unaffected
+        assert!(outages.ask(Origin::NetEase, fail).is_err());
+        assert_eq!(asked.get(), 2);
+        // asking by hand clears it, and so does waiting
+        outages.forget();
+        assert!(outages.ask(Origin::Lrclib, fail).is_err());
+        assert_eq!(asked.get(), 3);
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(outages.ask(Origin::Lrclib, || Ok(())).is_ok());
+        // an answer clears the failure
+        assert!(outages.ask(Origin::Lrclib, || Ok(())).is_ok());
+    }
+
     use super::*;
 
     #[test]
