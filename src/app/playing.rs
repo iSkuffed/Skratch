@@ -137,47 +137,31 @@ impl DrawerLayout {
         let y = row.tabs.center().y;
         let row_top = row.tabs.top().min(y - GEAR_HALF);
         let row_bottom = row.tabs.bottom().max(y + GEAR_HALF);
-        let width = (edge.width() * 0.5).clamp(300.0, 540.0).min(edge.width());
+        // the tab hangs off the drawer's left edge, so the drawer leaves room for it
+        let width = (edge.width() * 0.4)
+            .clamp(300.0, 420.0)
+            .min(edge.width() - TAB_W);
         let left = edge.right() - width;
-        let inner = (width * 0.62).max(240.0).min(width - 24.0);
+        let inner = (width - 48.0).max(240.0).min(width - 24.0);
         let content = Rect::from_min_max(
             pos2(edge.right() - 24.0 - inner, row_bottom + 14.0),
             pos2(edge.right() - 24.0, edge.bottom() - 14.0),
         );
         let gear_in = pos2(row.right - GEAR_HALF, y);
-        // The tab hangs off the drawer's left edge, on the tab row, when the tabs leave room for
-        // it. When they do not (a narrow panel), the drawer starts below the row and the tab
-        // stands on top of it, just past the tabs, so it never covers them.
-        let (tab, top, tab_round) = if left - TAB_W - 12.0 >= row.tabs.right() {
-            let round = egui::CornerRadius {
-                nw: 10,
-                sw: 10,
-                ne: 0,
-                se: 0,
-            };
-            let tab = Rect::from_min_max(pos2(left - TAB_W, row_top), pos2(left, row_bottom));
-            (tab, row_top, round)
-        } else {
-            let x = (row.tabs.right() + 12.0).min(edge.right() - TAB_W - 24.0);
-            let round = egui::CornerRadius {
-                nw: 10,
-                ne: 10,
-                sw: 0,
-                se: 0,
-            };
-            let tab = Rect::from_min_max(pos2(x, row_top), pos2(x + TAB_W, row_bottom));
-            (tab, row_bottom, round)
+        // the drawer runs the whole height of the page and covers the tab row while it is out
+        let tab = Rect::from_min_max(pos2(left - TAB_W, row_top), pos2(left, row_bottom));
+        let tab_round = egui::CornerRadius {
+            nw: 10,
+            sw: 10,
+            ne: 0,
+            se: 0,
         };
         let gear_out = pos2(tab.center().x.min(gear_in.x), y);
-        // the pointer counts as on the drawer from where it has become visibly dark
-        let block = Rect::from_min_max(pos2(edge.right() - width * 0.8, top), edge.right_bottom());
-        let near = Rect::from_min_max(
-            pos2(block.left().min(tab.left() - 4.0), row_top),
-            edge.right_bottom(),
-        );
+        let block = Rect::from_min_max(pos2(left, edge.top()), edge.right_bottom());
+        let near = Rect::from_min_max(pos2(tab.left() - 4.0, edge.top()), edge.right_bottom());
         Self {
             block,
-            backing: Rect::from_min_max(pos2(left, top), edge.right_bottom()),
+            backing: block,
             tab,
             tab_round,
             content,
@@ -336,6 +320,8 @@ impl Skratch {
             vec2(ui.available_width(), 28.0),
             egui::Layout::left_to_right(Align::Center),
             |ui| {
+                // the drawer covers the tab row while it is out, so the labels leave first
+                ui.multiply_opacity(1.0 - self.drawer.out);
                 ui.spacing_mut().item_spacing.x = 18.0;
                 for choice in NowPanel::ALL {
                     let active = choice == panel;
@@ -388,7 +374,11 @@ impl Skratch {
                 {
                     self.viz_backdrop(ui, area, 1.0);
                 }
-                self.lyrics(ui, track);
+                // the lyrics step back while the drawer is out, so they do not show through it
+                ui.scope(|ui| {
+                    ui.multiply_opacity(1.0 - 0.6 * self.drawer.out);
+                    self.lyrics(ui, track);
+                });
             }
             NowPanel::Visualizer => {
                 let dir = self.data_dir.join("lyrics");
@@ -414,7 +404,10 @@ impl Skratch {
                         style::scrim_down(&ui.painter().with_clip_rect(area), area, 10.0, 160);
                     });
                 }
-                self.panel_list(ui, panel);
+                ui.scope(|ui| {
+                    ui.multiply_opacity(1.0 - 0.6 * self.drawer.out);
+                    self.panel_list(ui, panel);
+                });
             }
         }
         // Details has nothing to set, and the lyrics editor has no use for the drawer
@@ -554,8 +547,15 @@ impl Skratch {
                 // the whole strip belongs to the drawer, so clicks on it miss what is beneath
                 ui.allocate_rect(layout.block.translate(shift), Sense::hover());
                 ui.allocate_rect(layout.tab.translate(shift), Sense::hover());
-                style::drawer_backing(ui.painter(), layout.backing.translate(shift), 28.0);
+                style::drawer_shadow(ui.painter(), layout.backing.translate(shift));
+                style::drawer_backing(ui.painter(), layout.backing.translate(shift));
                 style::drawer_tab(ui.painter(), layout.tab.translate(shift), layout.tab_round);
+                style::drawer_outline(
+                    ui.painter(),
+                    layout.backing.translate(shift),
+                    layout.tab.translate(shift),
+                    layout.tab_round,
+                );
                 if gear {
                     // the gear stays fully there while the drawer fades in around it
                     let mut painter = ui.painter().clone();
@@ -1032,48 +1032,54 @@ impl Skratch {
                 self.lyrics.scrolled = current;
             }
             Status::Missing => {
-                ui.add_space(8.0);
-                // the visualizer plays at full strength behind, so the message gets a dark card
+                // the visualizer may play at full strength behind, so the message gets a dark card
+                ui.add_space((height * 0.22).min(120.0));
+                let width = ui.available_width().min(380.0);
                 egui::Frame::new()
-                    .fill(egui::Color32::from_black_alpha(170))
-                    .corner_radius(8)
-                    .inner_margin(12)
+                    .fill(egui::Color32::from_black_alpha(165))
+                    .stroke(egui::Stroke::new(
+                        1.0_f32,
+                        egui::Color32::from_white_alpha(20),
+                    ))
+                    .corner_radius(16)
+                    .inner_margin(egui::Margin::symmetric(22, 18))
                     .show(ui, |ui| {
-                        if self.state.lyrics_online {
-                            let dir = self.data_dir.join("lyrics");
-                            ui.label(dim("No lyrics found for this track.".into()));
-                            if !self.lyrics.notes.is_empty() {
-                                egui::CollapsingHeader::new("Show details")
-                                    .id_salt("lyric-notes")
-                                    .show(ui, |ui| {
-                                        for (source, said) in &self.lyrics.notes {
-                                            ui.label(
-                                                RichText::new(format!("{source}: {said}"))
-                                                    .color(style::CREAM_DIM),
-                                            );
-                                        }
-                                    });
-                            }
-                            if !lyrics::has_user_version(&dir, track)
+                        ui.set_width((width - 44.0).max(120.0));
+                        let dir = self.data_dir.join("lyrics");
+                        let online = self.state.lyrics_online;
+                        ui.label(
+                            RichText::new("No lyrics for this track")
+                                .size(20.0)
+                                .color(style::CREAM),
+                        );
+                        ui.add_space(4.0);
+                        let (said, privacy) = if online {
+                            ("Nothing turned up in the file, beside it, or online.", None)
+                        } else {
+                            (
+                                "There are none in the file or in a .lrc file beside it.",
+                                Some(
+                                    "Skratch can look them up on LRCLIB, a free community \
+                                     database. That sends the artist, title, album and length.",
+                                ),
+                            )
+                        };
+                        ui.label(RichText::new(said).size(14.0).color(style::CREAM_DIM));
+                        if let Some(privacy) = privacy {
+                            ui.add_space(2.0);
+                            ui.label(RichText::new(privacy).size(12.0).color(style::CREAM_DIM));
+                        }
+                        ui.add_space(14.0);
+                        ui.horizontal_wrapped(|ui| {
+                            if !online {
+                                if ui.button("Look up online").clicked() {
+                                    self.state.lyrics_online = true;
+                                }
+                            } else if !lyrics::has_user_version(&dir, track)
                                 && ui.button("Try again").clicked()
                             {
                                 self.lyrics.ask_again(&dir, track);
                             }
-                        } else {
-                            ui.label(dim(
-                                "No lyrics in the file or beside it (a .lrc file).".into()
-                            ));
-                            ui.add_space(8.0);
-                            ui.label(
-                        RichText::new(
-                            "Skratch can look them up on lrclib.net, a free community lyrics \
-                             database. That sends the artist, title, album and length.",
-                        )
-                        .color(style::CREAM_DIM),
-                    );
-                        }
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
                             if ui.button("Type lyrics").clicked() {
                                 self.lyrics.editing = Some(String::new());
                             }
@@ -1081,8 +1087,24 @@ impl Skratch {
                                 self.import_lyrics_file(ui.ctx());
                             }
                         });
-                        ui.add_space(8.0);
-                        ui.checkbox(&mut self.state.lyrics_online, "Look up lyrics online");
+                        if online && !self.lyrics.notes.is_empty() {
+                            ui.add_space(8.0);
+                            egui::CollapsingHeader::new(
+                                RichText::new("What each source said")
+                                    .size(12.0)
+                                    .color(style::CREAM_DIM),
+                            )
+                            .id_salt("lyric-notes")
+                            .show(ui, |ui| {
+                                for (source, said) in &self.lyrics.notes {
+                                    ui.label(
+                                        RichText::new(format!("{source}: {said}"))
+                                            .size(12.0)
+                                            .color(style::CREAM_DIM),
+                                    );
+                                }
+                            });
+                        }
                     });
             }
         }
@@ -1255,7 +1277,9 @@ mod tests {
         assert_eq!(wide.tab.right(), wide.backing.left());
         assert_eq!(wide.gear_out, wide.tab.center());
         assert!(wide.tab.left() > 1220.0);
-        assert_eq!(wide.backing.top(), wide.tab.top());
+        // the drawer runs the full height of the page, the tab hangs off it on the tab row
+        assert_eq!(wide.backing.top(), edge.top());
+        assert!(wide.tab.top() > edge.top() && wide.tab.bottom() <= 88.0 + GEAR_HALF);
         // the drawer slides exactly as far as the gear has to go
         assert_eq!(wide.shift(0.0).x, wide.gear_in.x - wide.gear_out.x);
         assert_eq!(wide.shift(1.0), Vec2::ZERO);
@@ -1268,28 +1292,28 @@ mod tests {
         // the options sit inside the backing, below the tab row
         assert!(wide.backing.contains_rect(wide.content));
         assert!(wide.content.top() > 88.0);
-        // a narrow page: the tabs nearly fill the row, so the gear has nowhere to go
+        // a narrow page: the tab still fits beside the drawer, inside the page
         let edge = Rect::from_min_max(pos2(220.0, 50.0), pos2(1000.0, 880.0));
         let narrow = DrawerLayout::new(edge, row(950.0, 976.0));
-        assert!(narrow.gear_out.x > 950.0 && narrow.gear_out.x <= narrow.gear_in.x);
+        assert!(narrow.tab.left() >= edge.left());
+        assert!(narrow.gear_out.x < narrow.gear_in.x);
     }
 
     #[test]
-    fn the_gear_has_room_to_pull_out_when_the_tabs_nearly_fill_a_narrow_panel() {
-        // a 464 px panel whose tabs run to x = 333: the gear rests past them, at the panel's
-        // edge, and comes out to just after them instead of sitting on the last tab
+    fn the_pull_tab_fits_in_a_narrow_panel() {
+        // a 464 px panel: the drawer takes 300 and the tab hangs off its left edge
         let edge = Rect::from_min_max(pos2(0.0, 0.0), pos2(464.0, 680.0));
         let row = GearRow {
             tabs: Rect::from_min_max(pos2(20.0, 8.0), pos2(333.0, 36.0)),
             right: 464.0,
         };
         let layout = DrawerLayout::new(edge, row);
-        assert!(layout.gear_in.x - GEAR_HALF >= 333.0);
-        assert!(layout.gear_out.x - GEAR_HALF >= 333.0);
+        assert_eq!(layout.tab.right(), layout.backing.left());
+        assert!(layout.tab.left() >= 0.0);
         assert!(layout.gear_out.x < layout.gear_in.x);
-        // here the drawer starts under the row and the tab stands on top of it, past the tabs
-        assert!(layout.tab.left() > 333.0 && layout.tab.right() <= 464.0);
-        assert_eq!(layout.tab.bottom(), layout.backing.top());
+        // even a panel hardly wider than the tab keeps the tab inside it
+        let tiny = DrawerLayout::new(Rect::from_min_max(pos2(0.0, 0.0), pos2(200.0, 400.0)), row);
+        assert!(tiny.tab.left() >= 0.0);
     }
 
     #[test]

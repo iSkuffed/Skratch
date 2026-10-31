@@ -811,46 +811,81 @@ pub fn resize_edges(ctx: &Context) {
 }
 
 /// How dark the settings drawer is at `t`: 0 at its left edge, 1 at the panel's right edge.
-/// Clear at the left, deepening towards the right.
+/// Dark all the way across, so the options read over anything.
 pub fn drawer_alpha(t: f32) -> f32 {
-    0.92 * (1.0 - (1.0 - t.clamp(0.0, 1.0)).powf(2.2))
+    // a little lighter at the edge the tab hangs off, settled well before the options start
+    let t = (t / 0.2).clamp(0.0, 1.0);
+    0.80 + 0.15 * t * t * (3.0 - 2.0 * t)
 }
 
-/// The settings drawer's backing: a dark wash that fades out towards the left, and over the
-/// first `soft_top` pixels downwards, so its top edge does not show as a line.
-pub fn drawer_backing(p: &Painter, rect: Rect, soft_top: f32) {
-    const STEPS: u32 = 16;
-    let rows = [
-        (rect.top(), 0.0_f32),
-        ((rect.top() + soft_top).min(rect.bottom()), 1.0),
-        (rect.bottom(), 1.0),
-    ];
+/// The settings drawer's backing: a dark plate, a little lighter at its left edge.
+pub fn drawer_backing(p: &Painter, rect: Rect) {
+    const STEPS: u32 = 12;
     let mut mesh = Mesh::default();
     for k in 0..=STEPS {
-        let across = k as f32 / STEPS as f32;
-        let x = egui::lerp(rect.x_range(), across);
-        for (y, down) in rows {
-            let alpha = (drawer_alpha(across) * down * 255.0) as u8;
-            mesh.colored_vertex(pos2(x, y), Color32::from_rgba_unmultiplied(8, 7, 6, alpha));
-        }
+        let x = egui::lerp(rect.x_range(), k as f32 / STEPS as f32);
+        let alpha = (drawer_alpha(k as f32 / STEPS as f32) * 255.0) as u8;
+        let colour = Color32::from_rgba_unmultiplied(8, 7, 6, alpha);
+        mesh.colored_vertex(pos2(x, rect.top()), colour);
+        mesh.colored_vertex(pos2(x, rect.bottom()), colour);
     }
-    // three vertices per column, so two cells between neighbouring columns
     for k in 0..STEPS {
-        let column = 3 * k;
-        for cell in 0..2 {
-            let a = column + cell;
-            mesh.add_triangle(a, a + 1, a + 3);
-            mesh.add_triangle(a + 1, a + 3, a + 4);
-        }
+        let a = 2 * k;
+        mesh.add_triangle(a, a + 1, a + 2);
+        mesh.add_triangle(a + 1, a + 2, a + 3);
     }
     p.add(Shape::mesh(mesh));
 }
 
-/// The settings drawer's pull tab: a small dark plate for the gear, about as dark as the
-/// drawer is at its right edge. `round` leaves the corners that join the drawer square.
+/// A soft shadow along the drawer's left edge, which lifts it off the page.
+pub fn drawer_shadow(p: &Painter, backing: Rect) {
+    const STEPS: u32 = 8;
+    const WIDTH: f32 = 28.0;
+    let mut mesh = Mesh::default();
+    for k in 0..=STEPS {
+        let t = k as f32 / STEPS as f32;
+        let x = backing.left() - WIDTH * (1.0 - t);
+        let alpha = (0.42 * t * t * 255.0) as u8;
+        let colour = Color32::from_rgba_unmultiplied(0, 0, 0, alpha);
+        mesh.colored_vertex(pos2(x, backing.top()), colour);
+        mesh.colored_vertex(pos2(x, backing.bottom()), colour);
+    }
+    for k in 0..STEPS {
+        let a = 2 * k;
+        mesh.add_triangle(a, a + 1, a + 2);
+        mesh.add_triangle(a + 1, a + 2, a + 3);
+    }
+    p.add(Shape::mesh(mesh));
+}
+
+/// The settings drawer's pull tab: a small plate for the gear as dark as the drawer's left edge,
+/// so the two read as one piece. `round` leaves the corners that join the drawer square.
 pub fn drawer_tab(p: &Painter, rect: Rect, round: CornerRadius) {
-    let alpha = (drawer_alpha(0.55) * 255.0) as u8;
+    let alpha = (drawer_alpha(0.0) * 255.0) as u8;
     p.rect_filled(rect, round, Color32::from_rgba_unmultiplied(8, 7, 6, alpha));
+}
+
+/// A hairline round the drawer and its tab, so the two read as one object: along the tab's top,
+/// left and bottom, then down the drawer's left edge above and below the tab.
+pub fn drawer_outline(p: &Painter, backing: Rect, tab: Rect, round: CornerRadius) {
+    let r = f32::from(round.nw);
+    let mut path = vec![pos2(tab.right(), tab.top() + 0.5)];
+    // round the two left corners, angles in screen space (y down)
+    for (centre, from) in [
+        (pos2(tab.left() + r, tab.top() + r), -90.0_f32),
+        (pos2(tab.left() + r, tab.bottom() - r), 180.0),
+    ] {
+        for k in 0..=6 {
+            let a = (from - 90.0 * k as f32 / 6.0).to_radians();
+            path.push(centre + Vec2::new(a.cos(), a.sin()) * r);
+        }
+    }
+    path.push(pos2(tab.right(), tab.bottom() - 0.5));
+    let stroke = Stroke::new(1.0_f32, Color32::from_white_alpha(48));
+    p.add(Shape::line(path, stroke));
+    let x = backing.left() + 0.5;
+    p.line_segment([pos2(x, backing.top()), pos2(x, tab.top())], stroke);
+    p.line_segment([pos2(x, tab.bottom()), pos2(x, backing.bottom())], stroke);
 }
 
 /// How much of a list's dark backing is left `t` of the way down it (0 top, 1 bottom): all of
@@ -1088,13 +1123,13 @@ mod tests {
     }
 
     #[test]
-    fn the_drawer_is_clear_at_its_left_and_darkest_at_its_right() {
-        assert_eq!(drawer_alpha(0.0), 0.0);
-        assert!((drawer_alpha(1.0) - 0.92).abs() < 1e-6);
+    fn the_drawer_is_dark_throughout_and_settles_past_its_left_edge() {
+        assert!((drawer_alpha(0.0) - 0.80).abs() < 1e-6);
+        assert!((drawer_alpha(1.0) - 0.95).abs() < 1e-6);
         let steps: Vec<f32> = (0..=20).map(|k| drawer_alpha(k as f32 / 20.0)).collect();
-        assert!(steps.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(steps.windows(2).all(|pair| pair[0] <= pair[1]) && steps[0] < steps[2]);
         // out-of-range input stays on the curve's ends
-        assert_eq!(drawer_alpha(-3.0), 0.0);
+        assert_eq!(drawer_alpha(-3.0), drawer_alpha(0.0));
         assert_eq!(drawer_alpha(5.0), drawer_alpha(1.0));
     }
 }
