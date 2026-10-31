@@ -18,7 +18,27 @@ fn window_icon() -> eframe::egui::IconData {
     }
 }
 
+/// Lets the C allocator keep two memory pools instead of one per worker thread. Each thread that
+/// decodes a track or a cover otherwise gets a pool of its own that holds on to its busiest
+/// moment for good, so a long session creeps up by tens of megabytes. `MALLOC_ARENA_MAX` in the
+/// environment still wins.
+#[cfg(target_os = "linux")]
+fn share_allocator_pools() {
+    unsafe extern "C" {
+        fn mallopt(param: i32, value: i32) -> i32;
+    }
+    const M_ARENA_MAX: i32 = -8;
+    if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
+        // SAFETY: called first thing in `main`, before any other thread exists.
+        unsafe { mallopt(M_ARENA_MAX, 2) };
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn share_allocator_pools() {}
+
 fn main() -> anyhow::Result<()> {
+    share_allocator_pools();
     let data_dir = if let Some(path) = std::env::var_os("SKRATCH_DATA_DIR") {
         PathBuf::from(path)
     } else {
