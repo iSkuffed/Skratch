@@ -122,37 +122,33 @@ impl Skratch {
         });
     }
 
-    /// The switchable right-hand panel: a heading and drop-down, then the chosen content.
+    /// The switchable right-hand panel: a row of views to pick from, then the chosen content.
     fn panel_ui(&mut self, ui: &mut egui::Ui, track: &skratch::model::Track) {
         let panel = self.state.now_panel;
         ui.horizontal(|ui| {
-            let heading = match panel {
-                NowPanel::Details => "NOW PLAYING",
-                NowPanel::Lyrics => "LYRICS",
-                NowPanel::UpNext => "UP NEXT",
-                NowPanel::Library => "LIBRARY",
-                NowPanel::Visualizer => "VISUALIZER",
-            };
-            ui.label(
-                RichText::new(heading)
-                    .size(11.0)
+            ui.spacing_mut().item_spacing.x = 18.0;
+            for choice in NowPanel::ALL {
+                let active = choice == panel;
+                let mut text = RichText::new(choice.title().to_uppercase())
+                    .size(12.0)
                     .strong()
-                    .color(style::CREAM_DIM),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                egui::ComboBox::from_id_salt("now-panel")
-                    .selected_text(panel.title())
-                    .width(110.0)
-                    .show_ui(ui, |ui| {
-                        for choice in NowPanel::ALL {
-                            if ui
-                                .selectable_value(&mut self.state.now_panel, choice, choice.title())
-                                .clicked()
-                            {
-                                self.listed = None;
-                            }
-                        }
+                    .color(if active {
+                        style::CREAM
+                    } else {
+                        style::CREAM_DIM
                     });
+                if active {
+                    text = text.underline();
+                }
+                let tab = ui
+                    .add(egui::Label::new(text).sense(egui::Sense::click()))
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                if tab.clicked() && !active {
+                    self.state.now_panel = choice;
+                    self.listed = None;
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if panel == NowPanel::Visualizer {
                     let config = egui::containers::menu::MenuConfig::new()
                         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
@@ -176,7 +172,7 @@ impl Skratch {
         match panel {
             NowPanel::Details => self.details(ui, track),
             NowPanel::Lyrics => {
-                // a track without lyrics gets the visualizer behind the "no lyrics" message
+                // a track without lyrics gets the visualizer at full strength, the message on top
                 let dir = self.data_dir.join("lyrics");
                 self.lyrics
                     .update(ui.ctx(), track, &dir, self.state.lyric_sources());
@@ -185,7 +181,7 @@ impl Skratch {
                     && self.lyrics.editing.is_none()
                     && self.state.visualizer.fill_when_no_lyrics
                 {
-                    self.viz_panel(ui, area, 0.28);
+                    self.viz_panel(ui, area, 1.0);
                 }
                 self.lyrics(ui, track);
             }
@@ -614,48 +610,57 @@ impl Skratch {
             }
             Status::Missing => {
                 ui.add_space(8.0);
-                if self.state.lyrics_online {
-                    let dir = self.data_dir.join("lyrics");
-                    ui.label(dim("No lyrics found for this track.".into()));
-                    if !self.lyrics.notes.is_empty() {
-                        egui::CollapsingHeader::new("Show details")
-                            .id_salt("lyric-notes")
-                            .show(ui, |ui| {
-                                for (source, said) in &self.lyrics.notes {
-                                    ui.label(
-                                        RichText::new(format!("{source}: {said}"))
-                                            .color(style::CREAM_DIM),
-                                    );
-                                }
-                            });
-                    }
-                    if !lyrics::has_user_version(&dir, track) && ui.button("Try again").clicked() {
-                        self.lyrics.ask_again(&dir, track);
-                    }
-                } else {
-                    ui.label(dim(
-                        "No lyrics in the file or beside it (a .lrc file).".into()
-                    ));
-                    ui.add_space(8.0);
-                    ui.label(
+                // the visualizer plays at full strength behind, so the message gets a dark card
+                egui::Frame::new()
+                    .fill(egui::Color32::from_black_alpha(170))
+                    .corner_radius(8)
+                    .inner_margin(12)
+                    .show(ui, |ui| {
+                        if self.state.lyrics_online {
+                            let dir = self.data_dir.join("lyrics");
+                            ui.label(dim("No lyrics found for this track.".into()));
+                            if !self.lyrics.notes.is_empty() {
+                                egui::CollapsingHeader::new("Show details")
+                                    .id_salt("lyric-notes")
+                                    .show(ui, |ui| {
+                                        for (source, said) in &self.lyrics.notes {
+                                            ui.label(
+                                                RichText::new(format!("{source}: {said}"))
+                                                    .color(style::CREAM_DIM),
+                                            );
+                                        }
+                                    });
+                            }
+                            if !lyrics::has_user_version(&dir, track)
+                                && ui.button("Try again").clicked()
+                            {
+                                self.lyrics.ask_again(&dir, track);
+                            }
+                        } else {
+                            ui.label(dim(
+                                "No lyrics in the file or beside it (a .lrc file).".into()
+                            ));
+                            ui.add_space(8.0);
+                            ui.label(
                         RichText::new(
                             "Skratch can look them up on lrclib.net, a free community lyrics \
                              database. That sends the artist, title, album and length.",
                         )
                         .color(style::CREAM_DIM),
                     );
-                }
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Type lyrics").clicked() {
-                        self.lyrics.editing = Some(String::new());
-                    }
-                    if ui.button("Import from file...").clicked() {
-                        self.import_lyrics_file(ui.ctx());
-                    }
-                });
-                ui.add_space(8.0);
-                ui.checkbox(&mut self.state.lyrics_online, "Look up lyrics online");
+                        }
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Type lyrics").clicked() {
+                                self.lyrics.editing = Some(String::new());
+                            }
+                            if ui.button("Import from file...").clicked() {
+                                self.import_lyrics_file(ui.ctx());
+                            }
+                        });
+                        ui.add_space(8.0);
+                        ui.checkbox(&mut self.state.lyrics_online, "Look up lyrics online");
+                    });
             }
         }
     }
