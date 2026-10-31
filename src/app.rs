@@ -2673,7 +2673,9 @@ impl eframe::App for Skratch {
         self.poll_setup();
         self.poll_pick();
         self.visible.clear();
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
+        // keys are for this window only; whatever else has focus (a game, say) keeps its own
+        let focused = ctx.input(|i| i.focused);
+        if focused && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
             if self.view == View::Playing {
                 self.state.now_panel = NowPanel::Library;
                 self.listed = None;
@@ -2684,11 +2686,14 @@ impl eframe::App for Skratch {
             }
             ctx.memory_mut(|m| m.request_focus(egui::Id::new(SEARCH_ID)));
         }
-        if !ctx.wants_keyboard_input() && ctx.input(|input| input.key_pressed(egui::Key::Space)) {
+        if focused
+            && !ctx.wants_keyboard_input()
+            && ctx.input(|input| input.key_pressed(egui::Key::Space))
+        {
             self.perform(Action::Pause);
         }
         // arrow keys scrub, unless a text box is using them
-        if !ctx.wants_keyboard_input() && self.state.queue.current_id().is_some() {
+        if focused && !ctx.wants_keyboard_input() && self.state.queue.current_id().is_some() {
             for (key, seconds) in [(egui::Key::ArrowLeft, -5.0), (egui::Key::ArrowRight, 5.0)] {
                 // one call takes one key event, and a held key can bring several per frame
                 while ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
