@@ -2,7 +2,7 @@
 //! between the track details, the queue and the whole library.
 use super::{Action, Skratch, display, lyricview};
 use crate::{
-    state::{NowPanel, RhymeShow, Source},
+    state::{NowPanel, RhymeShow, Source, VizStyle},
     style,
 };
 use eframe::egui::text::{CCursor, CCursorRange};
@@ -72,6 +72,10 @@ impl Skratch {
                     .add(egui::Shape::mesh(mesh));
             }
 
+            // the ring style circles the record itself, under everything else drawn on it
+            if self.ring_on_record() {
+                self.viz_ring_at(ui, centre, r);
+            }
             // a faint halo in the track's colour that swells with the bass
             let beat = self.beat;
             for (grow, alpha, reach) in [(1.4, 0.04, 0.22), (1.25, 0.05, 0.13), (1.1, 0.07, 0.06)] {
@@ -180,6 +184,7 @@ impl Skratch {
                 if none
                     && self.lyrics.editing.is_none()
                     && self.state.visualizer.fill_when_no_lyrics
+                    && !self.ring_on_record()
                 {
                     self.viz_panel(ui, area, 1.0);
                 }
@@ -192,13 +197,30 @@ impl Skratch {
                 let over = self.state.visualizer.lyrics
                     && matches!(self.lyrics.status, Status::Found(_))
                     && self.lyrics.editing.is_none();
-                self.viz_panel(ui, area, if over { 0.3 } else { 1.0 });
+                if !self.ring_on_record() {
+                    self.viz_panel(ui, area, if over { 0.3 } else { 1.0 });
+                }
                 if over {
                     self.lyrics(ui, track);
                 }
             }
             _ => self.panel_list(ui, panel),
         }
+    }
+
+    /// Whether the visualizer's ring is drawn around the record on the left, not in the panel.
+    fn ring_on_record(&self) -> bool {
+        let cfg = &self.state.visualizer;
+        cfg.style == VizStyle::Ring
+            && match self.state.now_panel {
+                NowPanel::Visualizer => true,
+                NowPanel::Lyrics => {
+                    cfg.fill_when_no_lyrics
+                        && self.lyrics.editing.is_none()
+                        && matches!(self.lyrics.status, Status::Missing)
+                }
+                _ => false,
+            }
     }
 
     fn details(&mut self, ui: &mut egui::Ui, track: &skratch::model::Track) {

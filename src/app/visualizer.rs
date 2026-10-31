@@ -261,6 +261,23 @@ impl Skratch {
             .paint(&painter, rect, &cfg, self.accent, self.beat, strength, None);
     }
 
+    /// The ring style, drawn around the record at `centre` (radius `r`) on the Now playing page.
+    pub(super) fn viz_ring_at(&mut self, ui: &egui::Ui, centre: Pos2, r: f32) {
+        self.viz_step(ui.ctx());
+        let cfg = self.state.visualizer.clone();
+        let inner = r * 1.14;
+        let rect = Rect::from_center_size(centre, vec2(1.0, 1.0) * 2.0 * (inner + r * 0.5 + 8.0));
+        self.viz.paint(
+            ui.painter(),
+            rect,
+            &cfg,
+            self.accent,
+            self.beat,
+            1.0,
+            Some(inner),
+        );
+    }
+
     /// Options shared by the panel's menu and the full-screen controls.
     pub(super) fn viz_menu(&mut self, ui: &mut egui::Ui, full: bool) {
         let cfg = &mut self.state.visualizer;
