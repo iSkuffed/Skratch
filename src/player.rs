@@ -83,6 +83,7 @@ impl Player {
         if output == Some("null") {
             command.arg("--ao=null");
         }
+        die_with_parent(&mut command);
         let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -252,6 +253,37 @@ impl Drop for Player {
         }
     }
 }
+
+/// Has the kernel kill mpv the moment Skratch dies, however it dies (a crash, SIGTERM, SIGKILL):
+/// a process that is killed runs no code, so `Drop` can't be what stops the music. The signal
+/// follows the thread that started mpv, which is the UI thread and lives as long as the app.
+#[cfg(target_os = "linux")]
+fn die_with_parent(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    unsafe extern "C" {
+        fn prctl(option: i32, ...) -> i32;
+        fn getppid() -> i32;
+    }
+    const PR_SET_PDEATHSIG: i32 = 1;
+    const SIGKILL: std::os::raw::c_ulong = 9;
+    let parent = std::process::id() as i32;
+    // SAFETY: runs between fork and exec, and calls only async-signal-safe functions.
+    unsafe {
+        command.pre_exec(move || {
+            if prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // Skratch may already have died before the signal was armed.
+            if getppid() != parent {
+                return Err(std::io::Error::from_raw_os_error(3));
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn die_with_parent(_command: &mut Command) {}
 
 fn wait_for_socket(path: &Path, child: &mut Child) -> Result<UnixStream> {
     let deadline = Instant::now() + CONNECT_TIMEOUT;

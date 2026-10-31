@@ -330,3 +330,71 @@ fn mpris_events_on_isolated_dbus() {
         MediaCommand::SetVolume(volume) if (volume - 42.0).abs() < 0.001
     ));
 }
+
+fn state_of(pid: u32) -> Option<char> {
+    let raw = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    raw[raw.rfind(')')? + 2..].chars().next()
+}
+
+fn mpv_children_of(parent: u32) -> Vec<u32> {
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| {
+            let Ok(raw) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                return false;
+            };
+            let Some(end) = raw.rfind(')') else {
+                return false;
+            };
+            let ppid = raw[end + 2..].split_whitespace().nth(1);
+            raw[..end].ends_with("mpv") && ppid == Some(&parent.to_string())
+        })
+        .collect()
+}
+
+/// Killing Skratch outright (no chance to run `Drop`) must not leave mpv playing on in the
+/// background. The test starts itself again as the "Skratch" that gets killed.
+#[test]
+fn mpv_dies_with_skratch_even_when_skratch_is_killed() {
+    if !mpv_available() {
+        return;
+    }
+    if std::env::var_os("SKRATCH_TEST_HOLD_PLAYER").is_some() {
+        let _player = Player::start_with_output(Arc::new(|| {}), Some("null")).unwrap();
+        println!("player ready");
+        std::thread::sleep(Duration::from_secs(60));
+        return;
+    }
+    let mut helper = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "mpv_dies_with_skratch_even_when_skratch_is_killed",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("SKRATCH_TEST_HOLD_PLAYER", "1")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let lines = std::io::BufReader::new(helper.stdout.take().unwrap());
+    let ready = std::io::BufRead::lines(lines)
+        .map_while(Result::ok)
+        .any(|line| line.contains("player ready"));
+    let mpv = mpv_children_of(helper.id());
+    helper.kill().unwrap(); // SIGKILL
+    helper.wait().unwrap();
+    assert!(ready, "the helper never started its player");
+    assert_eq!(mpv.len(), 1, "expected one mpv under the helper: {mpv:?}");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if matches!(state_of(mpv[0]), None | Some('Z')) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // do not leave it behind if the test is what finds the bug
+    let _ = Command::new("kill").arg(mpv[0].to_string()).status();
+    panic!("mpv {} outlived the process that started it", mpv[0]);
+}
