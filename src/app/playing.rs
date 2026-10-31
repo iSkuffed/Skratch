@@ -646,8 +646,6 @@ impl Skratch {
                 self.rebuild();
             }
             // Search within what is playing: an album or playlist stays an album or playlist.
-            let matching: std::collections::HashSet<usize> =
-                self.filtered.iter().copied().collect();
             match &self.state.source {
                 Source::Library => self
                     .filtered
@@ -656,6 +654,8 @@ impl Skratch {
                     .map(|(r, i)| (*i, None, r))
                     .collect(),
                 Source::Tracks(ids) => {
+                    let matching: std::collections::HashSet<usize> =
+                        self.filtered.iter().copied().collect();
                     let rows = ids
                         .iter()
                         .filter_map(|id| self.by_id.get(id))

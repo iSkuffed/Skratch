@@ -5,7 +5,10 @@ use eframe::egui;
 use std::{
     f32::consts::TAU,
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        OnceLock,
+        mpsc::{self, Receiver, Sender},
+    },
     time::Instant,
 };
 use symphonia::core::{
@@ -38,6 +41,8 @@ pub struct Analysis {
     pub bands: Vec<u8>,
 }
 
+static TWIDDLES: OnceLock<Vec<(f32, f32)>> = OnceLock::new();
+
 /// In-place radix-2 Fourier transform; the length must be a power of two.
 fn fft(re: &mut [f32], im: &mut [f32]) {
     let n = re.len();
@@ -54,12 +59,22 @@ fn fft(re: &mut [f32], im: &mut [f32]) {
             im.swap(i, j);
         }
     }
+    // the rotation of every stage, computed once: stage `len` starts at `len / 2 - 1`
+    let twiddles = TWIDDLES.get_or_init(|| {
+        let mut table = Vec::with_capacity(FFT);
+        let mut len = 2;
+        while len <= FFT {
+            let step = -TAU / len as f32;
+            table.extend((0..len / 2).map(|k| (step * k as f32).sin_cos()));
+            len <<= 1;
+        }
+        table
+    });
     let mut len = 2;
     while len <= n {
-        let step = -TAU / len as f32;
+        let stage = &twiddles[len / 2 - 1..len - 1];
         for start in (0..n).step_by(len) {
-            for k in 0..len / 2 {
-                let (sin, cos) = (step * k as f32).sin_cos();
+            for (k, &(sin, cos)) in stage.iter().enumerate() {
                 let (a, b) = (start + k, start + k + len / 2);
                 let (tr, ti) = (re[b] * cos - im[b] * sin, re[b] * sin + im[b] * cos);
                 (re[b], im[b]) = (re[a] - tr, im[a] - ti);
@@ -99,8 +114,8 @@ fn spectrum(history: &[f32], rate: f32, window: &[f32], out: &mut [f32; BANDS]) 
 /// Scales so the loud parts reach 1 whatever the mastering level.
 fn normalise(values: &[f32]) -> Vec<f32> {
     let mut sorted = values.to_vec();
-    sorted.sort_by(f32::total_cmp);
-    let top = sorted[sorted.len() * 95 / 100].max(1e-4);
+    let at = sorted.len() * 95 / 100;
+    let top = (*sorted.select_nth_unstable_by(at, f32::total_cmp).1).max(1e-4);
     values.iter().map(|v| (v / top).min(1.0)).collect()
 }
 
@@ -177,8 +192,8 @@ pub fn analyse(path: &Path) -> Option<Analysis> {
     }
     // the loud parts reach the top of the bars; 38 dB below them is the floor
     let mut sorted = decibels.clone();
-    sorted.sort_by(f32::total_cmp);
-    let top = sorted[sorted.len() * 97 / 100];
+    let at = sorted.len() * 97 / 100;
+    let top = *sorted.select_nth_unstable_by(at, f32::total_cmp).1;
     let bands = decibels
         .iter()
         .map(|db| (((db - top) / 38.0 + 1.0).clamp(0.0, 1.0) * 255.0) as u8)
@@ -341,5 +356,90 @@ mod tests {
             peaks[10],
             peaks[50]
         );
+    }
+}
+
+#[cfg(test)]
+mod equivalence {
+    use super::*;
+
+    /// The transform as it was before the rotations were cached.
+    fn direct_fft(re: &mut [f32], im: &mut [f32]) {
+        let n = re.len();
+        let mut j = 0;
+        for i in 1..n {
+            let mut bit = n >> 1;
+            while j & bit != 0 {
+                j ^= bit;
+                bit >>= 1;
+            }
+            j |= bit;
+            if i < j {
+                re.swap(i, j);
+                im.swap(i, j);
+            }
+        }
+        let mut len = 2;
+        while len <= n {
+            let step = -TAU / len as f32;
+            for start in (0..n).step_by(len) {
+                for k in 0..len / 2 {
+                    let (sin, cos) = (step * k as f32).sin_cos();
+                    let (a, b) = (start + k, start + k + len / 2);
+                    let (tr, ti) = (re[b] * cos - im[b] * sin, re[b] * sin + im[b] * cos);
+                    (re[b], im[b]) = (re[a] - tr, im[a] - ti);
+                    (re[a], im[a]) = (re[a] + tr, im[a] + ti);
+                }
+            }
+            len <<= 1;
+        }
+    }
+
+    fn noise(count: usize, mut seed: u32) -> Vec<f32> {
+        (0..count)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 8) as f32 / (1 << 24) as f32 * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cached_rotations_give_the_same_transform_to_rounding() {
+        for n in [2, 8, 256, FFT] {
+            let (mut re, mut im) = (noise(n, 7), noise(n, 99));
+            let (mut direct_re, mut direct_im) = (re.clone(), im.clone());
+            fft(&mut re, &mut im);
+            direct_fft(&mut direct_re, &mut direct_im);
+            let scale = direct_re
+                .iter()
+                .chain(&direct_im)
+                .fold(0.0_f32, |m, v| m.max(v.abs()));
+            for (a, b) in re.iter().chain(&im).zip(direct_re.iter().chain(&direct_im)) {
+                // a few units in the last place; the bars store whole steps of 1/255
+                assert!((a - b).abs() <= scale * 1e-5, "{a} against {b} at size {n}");
+            }
+        }
+    }
+
+    #[test]
+    fn selecting_the_percentile_matches_sorting() {
+        for count in [1, 2, 7, 100, 4097] {
+            let values: Vec<f32> = noise(count, count as u32)
+                .iter()
+                .map(|v| v.abs() * 3.0)
+                .collect();
+            let mut sorted = values.clone();
+            sorted.sort_by(f32::total_cmp);
+            let top = sorted[sorted.len() * 95 / 100].max(1e-4);
+            let sorted_way: Vec<f32> = values.iter().map(|v| (v / top).min(1.0)).collect();
+            let selected_way = normalise(&values);
+            assert!(
+                sorted_way
+                    .iter()
+                    .zip(&selected_way)
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            );
+        }
     }
 }

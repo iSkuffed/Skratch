@@ -409,29 +409,28 @@ impl Skratch {
 
     /// Sorts track indices by the chosen column.
     fn sort_indices(&self, indices: &mut [usize]) {
-        indices.sort_by(|a, b| {
+        // the lowercase text to compare, made once per track instead of once per comparison
+        let mut keyed: Vec<(usize, String, String)> = indices
+            .iter()
+            .map(|&i| {
+                let t = &self.tracks[i];
+                let (first, second) = match self.sort {
+                    Sort::Album => (t.album.to_lowercase(), t.album_artist.to_lowercase()),
+                    Sort::Artist => (t.artist.to_lowercase(), t.album.to_lowercase()),
+                    Sort::Title => (t.title.to_lowercase(), String::new()),
+                    Sort::Year => (t.album.to_lowercase(), String::new()),
+                    Sort::Filename => (String::new(), String::new()),
+                };
+                (i, first, second)
+            })
+            .collect();
+        keyed.sort_by(|(a, a1, a2), (b, b1, b2)| {
             let a = &self.tracks[*a];
             let b = &self.tracks[*b];
             let cmp = match self.sort {
-                Sort::Album => a
-                    .album
-                    .to_lowercase()
-                    .cmp(&b.album.to_lowercase())
-                    .then_with(|| {
-                        a.album_artist
-                            .to_lowercase()
-                            .cmp(&b.album_artist.to_lowercase())
-                    }),
-                Sort::Artist => a
-                    .artist
-                    .to_lowercase()
-                    .cmp(&b.artist.to_lowercase())
-                    .then_with(|| a.album.to_lowercase().cmp(&b.album.to_lowercase())),
-                Sort::Title => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
-                Sort::Year => a
-                    .year
-                    .cmp(&b.year)
-                    .then_with(|| a.album.to_lowercase().cmp(&b.album.to_lowercase())),
+                Sort::Album | Sort::Artist => a1.cmp(b1).then_with(|| a2.cmp(b2)),
+                Sort::Title => a1.cmp(b1),
+                Sort::Year => a.year.cmp(&b.year).then_with(|| a1.cmp(b1)),
                 Sort::Filename => a.path.cmp(&b.path),
             }
             .then_with(|| a.disc_number.cmp(&b.disc_number))
@@ -439,6 +438,9 @@ impl Skratch {
             .then_with(|| a.path.cmp(&b.path));
             if self.descending { cmp.reverse() } else { cmp }
         });
+        for (slot, (i, ..)) in indices.iter_mut().zip(keyed) {
+            *slot = i;
+        }
     }
 
     fn start_action(&self, id: i64, queue_index: Option<usize>, context_index: usize) -> Action {

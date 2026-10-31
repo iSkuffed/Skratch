@@ -132,6 +132,15 @@ pub fn draw_line(
     look: &Look,
 ) -> Response {
     let (base, color, fade) = (spec.size, spec.color, spec.fade);
+    let width = ui.available_width();
+    // lines far outside the view are not laid out again: their height is remembered
+    let key = egui::Id::new(("lyric-height", text, width as i32, base as i32));
+    if let Some(height) = ui.data(|d| d.get_temp::<f32>(key)) {
+        let rect = egui::Rect::from_min_size(ui.cursor().min, Vec2::new(width, height));
+        if !ui.clip_rect().expand(300.0).intersects(rect) {
+            return ui.allocate_rect(rect, Sense::click());
+        }
+    }
     // steps of a tenth, so a fading colour does not make a new layout on every frame
     let rhyme = (spec.rhyme.clamp(0.0, 1.0) * 10.0).round() / 10.0;
     let style = look.style;
@@ -218,15 +227,6 @@ pub fn draw_line(
         }
     }
 
-    let width = ui.available_width();
-    // lines far outside the view are not laid out again: their height is remembered
-    let key = egui::Id::new(("lyric-height", text, width as i32, base as i32));
-    if let Some(height) = ui.data(|d| d.get_temp::<f32>(key)) {
-        let rect = egui::Rect::from_min_size(ui.cursor().min, Vec2::new(width, height));
-        if !ui.clip_rect().expand(300.0).intersects(rect) {
-            return ui.allocate_rect(rect, Sense::click());
-        }
-    }
     let wrap = width / LIVE_SCALE;
     let painter = ui.painter().clone();
     let layout = |text: String, look: Look1| {

@@ -811,23 +811,22 @@ fn nonempty(value: String, fallback: String) -> String {
 
 fn cached_file(transaction: &Transaction<'_>, path: &str) -> Result<Option<CachedFile>> {
     Ok(transaction
-        .query_row(
+        .prepare_cached(
             "SELECT id, size, modified_ns, artwork, artwork_source,
                     artwork_size, artwork_modified_ns
              FROM tracks WHERE path = ?1",
-            [path],
-            |row| {
-                Ok(CachedFile {
-                    id: row.get(0)?,
-                    size: row.get(1)?,
-                    modified_ns: row.get(2)?,
-                    artwork: row.get(3)?,
-                    artwork_source: row.get(4)?,
-                    artwork_size: row.get(5)?,
-                    artwork_modified_ns: row.get(6)?,
-                })
-            },
-        )
+        )?
+        .query_row([path], |row| {
+            Ok(CachedFile {
+                id: row.get(0)?,
+                size: row.get(1)?,
+                modified_ns: row.get(2)?,
+                artwork: row.get(3)?,
+                artwork_source: row.get(4)?,
+                artwork_size: row.get(5)?,
+                artwork_modified_ns: row.get(6)?,
+            })
+        })
         .optional()?)
 }
 
@@ -852,10 +851,11 @@ fn cached_artwork_is_fresh(cached: &CachedFile, directory: &Path) -> bool {
 }
 
 fn add_track_source(transaction: &Transaction<'_>, id: i64, source: &str) -> Result<()> {
-    transaction.execute(
-        "INSERT OR IGNORE INTO track_sources(track_id, source_path) VALUES (?1, ?2)",
-        params![id, source],
-    )?;
+    transaction
+        .prepare_cached(
+            "INSERT OR IGNORE INTO track_sources(track_id, source_path) VALUES (?1, ?2)",
+        )?
+        .execute(params![id, source])?;
     Ok(())
 }
 
