@@ -2351,6 +2351,9 @@ impl Skratch {
                     let depth = self.state.look.depth;
                     let rows = self.groups.len().div_ceil(columns);
                     style::scroll().id_salt("group-grid").show_rows(ui, 230.0, rows, |ui, range| {
+                        // one wave over every card on screen, whatever the window size
+                        let step = (0.45 / (range.len() * columns) as f64).min(0.03);
+                        let first = range.start;
                         for row in range {
                             ui.horizontal(|ui| {
                                 for col in 0..columns {
@@ -2359,9 +2362,10 @@ impl Skratch {
                                     ui.allocate_ui_with_layout(egui::vec2(170.0, 222.0), egui::Layout::top_down(egui::Align::LEFT), |ui| {
                                         const SIZE: f32 = 145.0;
                                         ui.set_min_size(egui::vec2(170.0, 222.0));
-                                        // the first cards rise in one after another
-                                        if stagger && index < 12 {
-                                            let a = ((since - 0.03 * index as f64) / 0.22).clamp(0.0, 1.0) as f32;
+                                        // the cards rise in one after another
+                                        if stagger && since < 0.7 {
+                                            let n = (row - first) * columns + col;
+                                            let a = ((since - step * n as f64) / 0.22).clamp(0.0, 1.0) as f32;
                                             ui.multiply_opacity(a);
                                             ui.add_space(8.0 * (1.0 - a * a * (3.0 - 2.0 * a)));
                                         }
