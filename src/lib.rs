@@ -1,5 +1,6 @@
 pub mod analysis;
 pub mod download;
+pub mod genius;
 pub mod library;
 pub mod lyricfx;
 pub mod lyrics;

@@ -40,6 +40,16 @@ pub(crate) fn get_json(url: &str, query: &[(&str, &str)]) -> Result<Value> {
     serde_json::from_slice(&bytes).context("unreadable response")
 }
 
+/// A web page as text, at most 3 MB of it.
+pub(crate) fn get_text(url: &str) -> Result<String> {
+    let mut response = agent().get(url).call()?;
+    Ok(response
+        .body_mut()
+        .with_config()
+        .limit(3 * 1024 * 1024)
+        .read_to_string()?)
+}
+
 /// Downloads an image, refusing anything that is not https or is oversized.
 pub fn fetch_image(url: &str) -> Result<Vec<u8>> {
     ensure!(url.starts_with("https://"), "refusing non-https image URL");

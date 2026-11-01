@@ -1,6 +1,7 @@
 //! Lyrics for the Now playing panel. Looked up in order: a `.lrc` file next to the track,
 //! lyrics in the file's own tags, a local cache, and (only when the user allows it) LRCLIB,
-//! then NetEase Cloud Music as a fallback when LRCLIB has nothing or is down.
+//! then NetEase Cloud Music as a fallback when LRCLIB has nothing or is down, then (plain text
+//! only, and only if switched on) Genius.
 use crate::{model::Track, online, tagparse};
 use anyhow::{Result, bail};
 use eframe::egui;
@@ -24,9 +25,9 @@ const MISS_TTL: Duration = Duration::from_secs(7 * 24 * 3600);
 /// not make every track wait out its timeout. "Try again" and "Try another source" ignore it.
 const OUTAGE: Duration = Duration::from_secs(5 * 60);
 
-/// When each online service (LRCLIB, NetEase) last failed to answer, if it did.
+/// When each online service (LRCLIB, NetEase, Genius) last failed to answer, if it did.
 struct Outages {
-    failed: [Mutex<Option<Instant>>; 2],
+    failed: [Mutex<Option<Instant>>; 3],
     hold: Duration,
 }
 
@@ -35,7 +36,7 @@ static OUTAGES: Outages = Outages::new(OUTAGE);
 impl Outages {
     const fn new(hold: Duration) -> Self {
         Self {
-            failed: [const { Mutex::new(None) }; 2],
+            failed: [const { Mutex::new(None) }; 3],
             hold,
         }
     }
@@ -43,7 +44,7 @@ impl Outages {
     /// Runs `fetch` unless this service failed less than `hold` ago, in which case it says so
     /// instead of waiting on it again.
     fn ask<T>(&self, origin: Origin, fetch: impl FnOnce() -> Result<T>) -> Result<T> {
-        let mut failed = self.failed[usize::from(origin == Origin::NetEase)]
+        let mut failed = self.failed[origin.service()]
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(left) = failed.and_then(|at| self.hold.checked_sub(at.elapsed())) {
@@ -298,6 +299,12 @@ fn netease(track: &Track) -> Result<Option<Lyrics>> {
     Ok(None)
 }
 
+/// Genius's plain lyrics for the track.
+fn genius(track: &Track) -> Result<Option<Lyrics>> {
+    Ok(crate::genius::lyrics(track.artist.trim(), &track.title)?
+        .and_then(|text| Lyrics::from_text(&text)))
+}
+
 fn embedded(path: &Path) -> Option<Lyrics> {
     let file = lofty::read_from_path(path).ok()?;
     let tag = file.primary_tag().or_else(|| file.first_tag())?;
@@ -362,6 +369,8 @@ pub struct Online {
     pub allowed: bool,
     /// Also ask NetEase when LRCLIB has nothing, and when trying another source.
     pub fallback: bool,
+    /// Also ask Genius, last, which only has plain lyrics.
+    pub genius: bool,
 }
 
 /// What each online source said, for the details under a "no lyrics" message.
@@ -378,6 +387,7 @@ pub enum Origin {
     Tags,
     Lrclib,
     NetEase,
+    Genius,
     /// An online answer remembered before Skratch noted which service gave it.
     Earlier,
 }
@@ -391,7 +401,17 @@ impl Origin {
             Self::Tags => "the file's tags",
             Self::Lrclib => "LRCLIB",
             Self::NetEase => "NetEase",
+            Self::Genius => "Genius",
             Self::Earlier => "an earlier online lookup",
+        }
+    }
+
+    /// Which slot in the outage table this online service has.
+    fn service(self) -> usize {
+        match self {
+            Self::NetEase => 1,
+            Self::Genius => 2,
+            _ => 0,
         }
     }
 
@@ -400,6 +420,7 @@ impl Origin {
         match self {
             Self::Lrclib => "lrclib",
             Self::NetEase => "netease",
+            Self::Genius => "genius",
             _ => "",
         }
     }
@@ -408,6 +429,7 @@ impl Origin {
         match key {
             Some("lrclib") => Self::Lrclib,
             Some("netease") => Self::NetEase,
+            Some("genius") => Self::Genius,
             _ => Self::Earlier,
         }
     }
@@ -490,6 +512,13 @@ fn find(track: &Track, dir: &Path, online: Online) -> Answer {
         lyrics = second.ok().flatten();
         origin = Origin::NetEase;
     }
+    if lyrics.is_none() && online.genius {
+        let third = OUTAGES.ask(Origin::Genius, || genius(track));
+        note("Genius", &third, &mut notes);
+        complete &= third.is_ok();
+        lyrics = third.ok().flatten();
+        origin = Origin::Genius;
+    }
     if lyrics.is_some() || complete {
         remember(dir, track, lyrics.as_ref(), origin);
     }
@@ -502,20 +531,31 @@ fn find(track: &Track, dir: &Path, online: Online) -> Answer {
 
 /// The first online lyrics that differ from `current`, preferring synced ones, and which
 /// service gave them. `Err` only when no source could be reached at all.
-fn other_source(track: &Track, current: Option<&Lyrics>) -> Result<Option<(Lyrics, Origin)>> {
+fn other_source(
+    track: &Track,
+    current: Option<&Lyrics>,
+    online: Online,
+) -> Result<Option<(Lyrics, Origin)>> {
     let mut found = Vec::new();
     let mut errors = Vec::new();
     let mut answered = 0;
-    for (origin, answer) in [
-        (
-            Origin::Lrclib,
-            OUTAGES.ask(Origin::Lrclib, || lrclib(track)),
-        ),
-        (
+    let mut sources: Vec<(Origin, Result<Option<Lyrics>>)> = vec![(
+        Origin::Lrclib,
+        OUTAGES.ask(Origin::Lrclib, || lrclib(track)),
+    )];
+    if online.fallback {
+        sources.push((
             Origin::NetEase,
             OUTAGES.ask(Origin::NetEase, || netease(track)),
-        ),
-    ] {
+        ));
+    }
+    if online.genius {
+        sources.push((
+            Origin::Genius,
+            OUTAGES.ask(Origin::Genius, || genius(track)),
+        ));
+    }
+    for (origin, answer) in sources {
         match answer {
             Ok(lyrics) => {
                 answered += 1;
@@ -649,7 +689,7 @@ impl Lookup {
 
     /// Asks every online source for this track and swaps in the first lyrics that differ from
     /// the ones showing (synced ones first). When there are none, nothing changes.
-    pub fn try_another(&mut self, ctx: &egui::Context, track: &Track, dir: &Path) {
+    pub fn try_another(&mut self, ctx: &egui::Context, track: &Track, dir: &Path, online: Online) {
         if self.other_state == OtherState::Searching {
             return;
         }
@@ -662,7 +702,7 @@ impl Lookup {
         let (tx, ctx) = (self.other.0.clone(), ctx.clone());
         let (track, dir) = (track.clone(), dir.to_path_buf());
         std::thread::spawn(move || {
-            let result = other_source(&track, current.as_ref());
+            let result = other_source(&track, current.as_ref(), online);
             if let Ok(Some((lyrics, origin))) = &result {
                 // the user's own file would hide the new lyrics on the next play
                 if user_file(&dir, &track).exists() {
@@ -867,5 +907,13 @@ mod tests {
         save(&cache, &track, "").unwrap();
         assert_eq!(origin(&track), None);
         assert_eq!(Origin::NetEase.label(), "NetEase");
+        remember(
+            &cache,
+            &track,
+            Some(&Lyrics::Plain("words".into())),
+            Origin::Genius,
+        );
+        assert_eq!(Origin::from_key(Some("genius")), Origin::Genius);
+        assert_eq!(Origin::Genius.label(), "Genius");
     }
 }

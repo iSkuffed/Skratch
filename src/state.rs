@@ -282,6 +282,9 @@ pub struct SavedState {
     /// Opts out of asking NetEase Cloud Music when lrclib.net has no lyrics (stored inverted
     /// so that an old save, which lacks it, gets the fallback).
     pub lyrics_no_fallback: bool,
+    /// Also asks Genius (plain lyrics, taken from its web pages) when the other services have
+    /// nothing. Off until the user switches it on.
+    pub lyrics_genius: bool,
     pub lyric_style: LyricStyle,
     pub effects: Effects,
     pub visualizer: Visualizer,
@@ -294,6 +297,7 @@ impl SavedState {
         skratch::lyrics::Online {
             allowed: self.lyrics_online,
             fallback: !self.lyrics_no_fallback,
+            genius: self.lyrics_genius,
         }
     }
 

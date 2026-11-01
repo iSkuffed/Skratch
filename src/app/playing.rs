@@ -890,16 +890,16 @@ impl Skratch {
             let button = ui
                 .add_enabled(
                     online.allowed
-                        && online.fallback
+                        && (online.fallback || online.genius)
                         && self.lyrics.other_state != OtherState::Searching,
                     egui::Button::new("Try another source"),
                 )
                 .on_hover_text(
                     "Ask the other lyric services and switch to different lyrics if any turn up; \
-                     otherwise these stay as they are. Needs online lookup and the NetEase fallback.",
+                     otherwise these stay as they are. Needs online lookup and NetEase or Genius switched on.",
                 );
             if button.clicked() {
-                self.lyrics.try_another(ui.ctx(), track, &dir);
+                self.lyrics.try_another(ui.ctx(), track, &dir, online);
             }
             if lyrics::has_user_version(&dir, track)
                 && ui

@@ -1101,6 +1101,11 @@ impl Skratch {
         )
         .on_hover_text("When lrclib.net has nothing or is down, music.163.com is asked with the artist, title and length.");
         self.state.lyrics_no_fallback = !fallback;
+        ui.add_enabled(
+            self.state.lyrics_online,
+            egui::Checkbox::new(&mut self.state.lyrics_genius, "Also try Genius (plain text)"),
+        )
+        .on_hover_text("Last, when the others have nothing: genius.com is asked with the artist and title and its song page is read for the words. Plain lyrics only, no timing. Genius's terms do not allow automated use, so this is off until you switch it on.");
         ui.collapsing("Effects", |ui| {
             let effects = &mut self.state.effects;
             ui.checkbox(&mut effects.animations, "Animations")
