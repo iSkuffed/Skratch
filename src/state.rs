@@ -38,6 +38,12 @@ impl NowPanel {
     pub fn is_stage(self) -> bool {
         matches!(self, Self::Lyrics | Self::Visualizer)
     }
+
+    /// Tabs that slide quick options out to their right: the two stage tabs, and the lists
+    /// (which bring out the selection controls).
+    pub fn has_flyout(self) -> bool {
+        !matches!(self, Self::Details)
+    }
 }
 
 /// How the spectrum is drawn.

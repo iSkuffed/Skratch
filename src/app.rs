@@ -249,6 +249,8 @@ pub struct Skratch {
     anchor: Option<i64>,
     /// The track ids in the list being shown this frame, in order.
     visible: Vec<i64>,
+    /// The songs the Now playing list showed last frame, for its Select all.
+    list_ids: Vec<i64>,
     /// A cover image being chosen for every selected track.
     pick_rx: Option<mpsc::Receiver<Result<Option<Vec<u8>>, String>>>,
     fill_open: bool,
@@ -390,6 +392,7 @@ impl Skratch {
             selected: HashSet::new(),
             anchor: None,
             visible: Vec::new(),
+            list_ids: Vec::new(),
             pick_rx: None,
             fill_open: false,
             cover: None,

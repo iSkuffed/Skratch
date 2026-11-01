@@ -39,9 +39,12 @@ pub struct Drawer {
     out: f32,
     /// Which of the Lyrics and Visualizer tabs has its quick options slid out in the tab row.
     flyout: Option<NowPanel>,
+    /// Whether select mode was on last frame, so turning it on (from a right-click menu) brings
+    /// the selection controls out once.
+    select_seen: bool,
 }
 
-/// One of the quick options that slide out of the Lyrics and Visualizer tabs.
+/// One of the quick options that slide out of the tabs.
 #[derive(Clone, Copy, PartialEq)]
 enum Quick {
     LookUp,
@@ -55,6 +58,10 @@ enum Quick {
     Style(VizStyle),
     VizOff,
     FullScreen,
+    /// Select mode in the lists: on, or off with nothing selected.
+    Select,
+    SelectAll,
+    SelectNone,
 }
 
 impl Quick {
@@ -76,6 +83,11 @@ impl Quick {
             Self::Style(_) => "Draw the visualizer this way",
             Self::VizOff => "Turn the visualizer off",
             Self::FullScreen => "Full screen: fill the window with the visualizer. Esc leaves.",
+            Self::Select => {
+                "Tick songs to act on several at once (right-click one for the actions)"
+            }
+            Self::SelectAll => "Tick every song in the list",
+            Self::SelectNone => "Untick everything",
         }
     }
 }
@@ -430,7 +442,13 @@ impl Skratch {
         clip.max.x = clip.max.x.min(right - 2.0 * GEAR_HALF - 8.0);
         ui.set_clip_rect(clip);
         ui.spacing_mut().item_spacing.x = 0.0;
-        if !panel.is_stage() {
+        if self.select_mode != self.drawer.select_seen {
+            self.drawer.select_seen = self.select_mode;
+            if self.select_mode && matches!(panel, NowPanel::UpNext | NowPanel::Library) {
+                self.drawer.flyout = Some(panel);
+            }
+        }
+        if self.drawer.flyout.is_some_and(|open| open != panel) {
             self.drawer.flyout = None;
         }
         let (mut tabs, mut hit) = (Rect::NOTHING, Rect::NOTHING);
@@ -438,7 +456,7 @@ impl Skratch {
         for choice in NowPanel::ALL {
             let active = choice == panel;
             let mut label = choice.title().to_uppercase();
-            if choice.is_stage() {
+            if choice.has_flyout() {
                 label.push_str(" ›");
             }
             let mut text = RichText::new(label).size(12.0).strong().color(if active {
@@ -456,7 +474,7 @@ impl Skratch {
             hit = hit.union(tab.rect);
             if tab.clicked() {
                 clicked = true;
-                self.drawer.flyout = if choice.is_stage() && self.drawer.flyout != Some(choice) {
+                self.drawer.flyout = if choice.has_flyout() && self.drawer.flyout != Some(choice) {
                     Some(choice)
                 } else {
                     None
@@ -466,7 +484,7 @@ impl Skratch {
                     self.listed = None;
                 }
             }
-            if choice.is_stage() {
+            if choice.has_flyout() {
                 let open = if self.state.effects.transitions() {
                     ctx.animate_bool_with_time_and_easing(
                         egui::Id::new(("flyout", choice.title())),
@@ -514,7 +532,7 @@ impl Skratch {
             .iter()
             .map(|(_, text, _)| {
                 ui.painter()
-                    .layout_no_wrap((*text).to_owned(), font.clone(), style::CREAM)
+                    .layout_no_wrap(text.clone(), font.clone(), style::CREAM)
             })
             .collect();
         let natural = LEAD
@@ -565,8 +583,28 @@ impl Skratch {
 
     /// What Lyrics and Visualizer bring out in the tab row: the label of each, and whether it is
     /// the one in force. Everything here is also in the settings drawer.
-    fn quick_items(&self, which: NowPanel, track: &Track) -> Vec<(Quick, &'static str, bool)> {
+    fn quick_items(&self, which: NowPanel, track: &Track) -> Vec<(Quick, String, bool)> {
         let cfg = &self.state.visualizer;
+        if matches!(which, NowPanel::UpNext | NowPanel::Library) {
+            let count = self.selected.len();
+            return if self.select_mode {
+                vec![
+                    (Quick::Select, "Done".to_owned(), true),
+                    (Quick::SelectAll, "All".to_owned(), false),
+                    (
+                        Quick::SelectNone,
+                        if count > 0 {
+                            format!("None ({count})")
+                        } else {
+                            "None".to_owned()
+                        },
+                        false,
+                    ),
+                ]
+            } else {
+                vec![(Quick::Select, "Select".to_owned(), false)]
+            };
+        }
         if which == NowPanel::Lyrics {
             let dir = self.data_dir.join("lyrics");
             let first = if !self.state.lyrics_online {
@@ -576,7 +614,7 @@ impl Skratch {
             } else {
                 (Quick::TryAgain, "Try again")
             };
-            return vec![
+            let items = vec![
                 (first.0, first.1, false),
                 (Quick::Type, "Edit", false),
                 (Quick::Import, "Import", false),
@@ -591,13 +629,23 @@ impl Skratch {
                     !cfg.lyrics,
                 ),
             ];
+            return items
+                .into_iter()
+                .map(|(quick, text, on)| (quick, text.to_owned(), on))
+                .collect();
         }
         let mut items: Vec<_> = VizStyle::ALL
             .into_iter()
-            .map(|s| (Quick::Style(s), s.title(), cfg.shown && cfg.style == s))
+            .map(|s| {
+                (
+                    Quick::Style(s),
+                    s.title().to_owned(),
+                    cfg.shown && cfg.style == s,
+                )
+            })
             .collect();
-        items.push((Quick::VizOff, "Off", !cfg.shown));
-        items.push((Quick::FullScreen, "Full", false));
+        items.push((Quick::VizOff, "Off".to_owned(), !cfg.shown));
+        items.push((Quick::FullScreen, "Full".to_owned(), false));
         items
     }
 
@@ -639,6 +687,14 @@ impl Skratch {
             }
             Quick::VizOff => self.state.visualizer.shown = false,
             Quick::FullScreen => self.viz_enter_full(ctx.input(|i| i.time)),
+            Quick::Select => {
+                self.select_mode = !self.select_mode;
+                if !self.select_mode {
+                    self.selected.clear();
+                }
+            }
+            Quick::SelectAll => self.selected.extend(self.list_ids.iter().copied()),
+            Quick::SelectNone => self.selected.clear(),
         }
     }
 
@@ -897,8 +953,8 @@ impl Skratch {
                 })
             {
                 let label = match quick {
-                    Quick::LookUp => "Look up online",
-                    Quick::Type => "Edit lyrics",
+                    Quick::LookUp => "Look up online".to_owned(),
+                    Quick::Type => "Edit lyrics".to_owned(),
                     _ => label,
                 };
                 if ui.button(label).on_hover_text(quick.hint()).clicked() {
@@ -1411,6 +1467,7 @@ impl Skratch {
                 }
             }
         };
+        self.list_ids = rows.iter().map(|(i, ..)| self.tracks[*i].id).collect();
         if rows.is_empty() {
             let nothing = match (!self.search.is_empty(), up_next) {
                 (true, _) => "Nothing matches.",
