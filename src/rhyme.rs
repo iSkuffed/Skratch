@@ -263,6 +263,10 @@ fn long_key(tail: &str) -> Option<String> {
 /// least two vowels here, because it starts at the last *stressed* vowel.
 fn weak_class(tail: &str) -> Option<&'static str> {
     let ph: Vec<&str> = tail.split(' ').collect();
+    // a bare "er" (her, fur) is the same ending as Joker, lover
+    if ph == ["ER"] {
+        return Some("ER");
+    }
     if ph.iter().filter(|p| VOWELS.contains(p)).count() < 2 {
         return None;
     }
@@ -357,8 +361,13 @@ pub fn mark_verse(lines: &[&str]) -> Vec<Vec<Mark>> {
 
     // Candidates: the last word of every phrase, outside parentheses.
     let mut cands: Vec<Cand> = Vec::new();
-    for (li, line) in lines.iter().enumerate() {
-        let toks = tokenize(line);
+    let all_toks: Vec<Vec<Tok>> = lines.iter().map(|l| tokenize(l)).collect();
+    // the last word of each line, to tell when a short word like "her" ends several lines
+    let ends: Vec<Option<&str>> = all_toks
+        .iter()
+        .map(|t| t.iter().rfind(|t| !t.paren).map(|t| t.text.as_str()))
+        .collect();
+    for (li, toks) in all_toks.iter().enumerate() {
         let end_idx = toks.iter().rposition(|t| !t.paren);
         for (ti, t) in toks.iter().enumerate() {
             let phrase_end = toks.get(ti + 1).is_none_or(|n| n.phrase != t.phrase);
@@ -372,8 +381,14 @@ pub fn mark_verse(lines: &[&str]) -> Vec<Vec<Mark>> {
             let phonemes = tail.split(' ').count();
             let letters = t.text.chars().filter(|c| c.is_alphabetic()).count();
             if STOP.contains(&t.text.as_str()) {
-                // "in", "me", "it" only count as a multi-phoneme line ending.
-                if !is_end || phonemes < 2 {
+                // "in", "me", "it" only count as a multi-phoneme line ending, or as a line
+                // ending that other nearby lines end on too ("... I sing to her", "... I stroke her").
+                let echoed = |o: usize| {
+                    ends[o].is_some_and(|w| same_word(w, &t.text))
+                };
+                let repeated = (li.saturating_sub(3)..(li + 4).min(lines.len()))
+                    .any(|o| o != li && echoed(o));
+                if !is_end || (phonemes < 2 && !repeated) {
                     continue;
                 }
             } else if !is_end && phonemes < 2 && letters < 3 {
@@ -611,6 +626,21 @@ mod tests {
             m[0][0].group == m[1][0].group && m[1][0].group == m[2][0].group,
             "{m:?}"
         );
+    }
+
+    #[test]
+    fn a_short_word_ending_several_lines_rhymes_with_its_family() {
+        let l = [
+            "Paper boats, I ride with her",
+            "Cold nights, I sing to her",
+            "Slow dance, I hold her",
+            "Quick draw, call me Joker",
+        ];
+        let m = mark_verse(&l);
+        assert!(m.iter().all(|x| x.len() == 1), "{m:?}");
+        assert!(m.iter().all(|x| x[0].group == m[0][0].group), "{m:?}");
+        // one lone "her" is still nothing
+        assert!(none(&["I walk with her", "into the night"]));
     }
 
     #[test]

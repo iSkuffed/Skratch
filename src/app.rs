@@ -1180,6 +1180,8 @@ impl Skratch {
             egui::Checkbox::new(&mut self.state.lyrics_genius, "Also try Genius (plain text)"),
         )
         .on_hover_text("Last, when the others have nothing: genius.com is asked with the artist and title and its song page is read for the words. Plain lyrics only, no timing. Genius's terms do not allow automated use, so this is off until you switch it on.");
+        ui.checkbox(&mut self.state.cover_genius, "Also look for covers on Genius")
+            .on_hover_text("Cover searches (the Find cover online window and suggested covers) also ask genius.com for album covers, with the artist and album. Genius's terms do not allow automated use, so this is off until you switch it on. Covers from it are labelled Genius.");
         ui.checkbox(&mut self.state.lyrics_embed, "Save lyrics into song files")
             .on_hover_text("Once a song has been played through, and when you look lyrics up for many songs, the lyrics Skratch holds for it are also written into the audio file's own tags. This changes your files, so it is off until you switch it on.");
         let mut suggest = !self.state.suggest_off;
@@ -2869,6 +2871,7 @@ impl eframe::App for Skratch {
     }
 
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        online::use_genius_covers(self.state.cover_genius);
         self.frame_at = Instant::now();
         self.poll(ctx);
         self.poll_setup();

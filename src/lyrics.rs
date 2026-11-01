@@ -530,6 +530,22 @@ impl Origin {
         }
     }
 
+    /// The service's own page for this track (its search for the artist and title), which the
+    /// "from ..." line links to. Lyrics that did not come from a website have none.
+    pub fn page(self, artist: &str, title: &str) -> Option<String> {
+        let q = format!("{} {}", artist.trim(), tagparse::strip_noise(title));
+        let q: String = url::form_urlencoded::byte_serialize(q.trim().as_bytes())
+            .collect::<String>()
+            .replace('+', "%20");
+        match self {
+            // LRCLIB's site is a search page of its own with no address for a query
+            Self::Lrclib => Some("https://lrclib.net/".to_owned()),
+            Self::NetEase => Some(format!("https://music.163.com/#/search/m/?s={q}&type=1")),
+            Self::Genius => Some(format!("https://genius.com/search?q={q}")),
+            _ => None,
+        }
+    }
+
     /// Which slot in the outage table this online service has.
     fn service(self) -> usize {
         match self {
@@ -1236,6 +1252,11 @@ mod tests {
         save(&cache, &track, "").unwrap();
         assert_eq!(origin(&track), None);
         assert_eq!(Origin::NetEase.label(), "NetEase");
+        assert_eq!(
+            Origin::Genius.page("Band", "Song").as_deref(),
+            Some("https://genius.com/search?q=Band%20Song")
+        );
+        assert!(Origin::Sidecar.page("Band", "Song").is_none());
         remember(
             &cache,
             &track,

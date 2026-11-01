@@ -1408,11 +1408,31 @@ impl Skratch {
         if let Some(origin) = origin {
             reveal.show(ui, |ui| {
                 ui.with_layout(egui::Layout::right_to_left(Align::Min), |ui| {
-                    ui.label(
-                        RichText::new(format!("from {}", origin.label()))
-                            .size(11.0)
-                            .color(style::CREAM_DIM),
-                    );
+                    let text = RichText::new(format!("from {}", origin.label()))
+                        .size(11.0)
+                        .color(style::CREAM_DIM);
+                    // a service's name is a link to its page for this song
+                    match origin.page(&track.artist, &track.title) {
+                        Some(url) => {
+                            let link = ui
+                                .add(egui::Label::new(text).sense(egui::Sense::click()))
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text(format!("Open {url}"));
+                            if link.hovered() {
+                                ui.painter().hline(
+                                    link.rect.x_range(),
+                                    link.rect.bottom() - 1.0,
+                                    egui::Stroke::new(1.0_f32, style::CREAM_DIM),
+                                );
+                            }
+                            if link.clicked() {
+                                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                            }
+                        }
+                        None => {
+                            ui.label(text);
+                        }
+                    }
                 });
             });
         }

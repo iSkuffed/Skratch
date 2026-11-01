@@ -326,6 +326,9 @@ pub struct SavedState {
     /// Also asks Genius (plain lyrics, taken from its web pages) when the other services have
     /// nothing. Off until the user switches it on.
     pub lyrics_genius: bool,
+    /// Also asks Genius for album covers in cover searches. Off, like Genius lyrics, because
+    /// Genius's terms do not allow automated use.
+    pub cover_genius: bool,
     /// Writes lyrics into a song's own file once it has been played through, from what Skratch
     /// already holds for it. Off, because it changes the user's files.
     pub lyrics_embed: bool,

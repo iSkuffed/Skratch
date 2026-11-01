@@ -1,9 +1,15 @@
-//! Online cover search: iTunes plus MusicBrainz / Cover Art Archive.
-//! Only ever called from a button press, one search at a time.
+//! Online cover search: iTunes, Deezer, MusicBrainz / Cover Art Archive and, when switched on,
+//! Genius. Only ever called from a button press (or the suggestions worker), one search at a time.
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{sync::OnceLock, time::Duration};
+use std::{
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 const USER_AGENT: &str = concat!(
     "Skratch/",
@@ -63,6 +69,14 @@ pub fn fetch_image(url: &str) -> Result<Vec<u8>> {
         .read_to_vec()?)
 }
 
+static GENIUS_COVERS: AtomicBool = AtomicBool::new(false);
+
+/// Whether `search` also asks Genius for album covers (the "Also try Genius" cover setting).
+/// A flag rather than an argument because the searches are started from several places.
+pub fn use_genius_covers(on: bool) {
+    GENIUS_COVERS.store(on, Ordering::Relaxed);
+}
+
 /// Searches every source. Fails only when all of them fail.
 pub fn search(artist: &str, album: &str) -> Result<Vec<Candidate>> {
     let (artist, album) = (artist.trim(), album.trim());
@@ -70,14 +84,67 @@ pub fn search(artist: &str, album: &str) -> Result<Vec<Candidate>> {
         !artist.is_empty() || !album.is_empty(),
         "type an artist or an album first"
     );
-    let apple = itunes(artist, album);
-    let brainz = musicbrainz(artist, album);
-    if let (Err(a), Err(b)) = (&apple, &brainz) {
-        anyhow::bail!("iTunes: {a:#}; MusicBrainz: {b:#}");
+    let mut sources = vec![
+        ("iTunes", itunes(artist, album)),
+        ("Deezer", deezer(artist, album)),
+        ("MusicBrainz", musicbrainz(artist, album)),
+    ];
+    if GENIUS_COVERS.load(Ordering::Relaxed) {
+        sources.push(("Genius", genius(artist, album)));
     }
-    let mut found = apple.unwrap_or_default();
-    found.extend(brainz.unwrap_or_default());
-    Ok(found)
+    if sources.iter().all(|(_, found)| found.is_err()) {
+        let errors: Vec<String> = sources
+            .iter()
+            .filter_map(|(name, found)| found.as_ref().err().map(|e| format!("{name}: {e:#}")))
+            .collect();
+        anyhow::bail!("{}", errors.join("; "));
+    }
+    Ok(sources
+        .into_iter()
+        .flat_map(|(_, found)| found.unwrap_or_default())
+        .collect())
+}
+
+fn deezer(artist: &str, album: &str) -> Result<Vec<Candidate>> {
+    let term = format!("{artist} {album}");
+    let json = get_json(
+        "https://api.deezer.com/search/album",
+        &[("q", term.trim()), ("limit", "8")],
+    )?;
+    Ok(parse_deezer(&json))
+}
+
+fn parse_deezer(json: &Value) -> Vec<Candidate> {
+    json["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|album| {
+            Some(Candidate {
+                label: format!(
+                    "{} - {}",
+                    album["artist"]["name"].as_str()?,
+                    album["title"].as_str()?
+                ),
+                source: "Deezer".to_owned(),
+                thumb: album["cover_medium"].as_str()?.to_owned(),
+                full: album["cover_xl"].as_str()?.to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn genius(artist: &str, album: &str) -> Result<Vec<Candidate>> {
+    Ok(crate::genius::albums(artist, album)?
+        .into_iter()
+        .map(|(label, cover)| Candidate {
+            label,
+            source: "Genius".to_owned(),
+            // the image host serves other sizes by name
+            thumb: cover.replace("1000x1000x1", "300x300x1"),
+            full: cover,
+        })
+        .collect())
 }
 
 fn itunes(artist: &str, album: &str) -> Result<Vec<Candidate>> {
@@ -369,6 +436,18 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].label, "A - B (2020)");
         assert_eq!(found[0].full, "https://is1.mzstatic.com/a/600x600bb.jpg");
+    }
+
+    #[test]
+    fn deezer_and_genius_albums_become_candidates() {
+        let json = json!({"data": [
+            {"title": "B", "artist": {"name": "A"}, "cover_medium": "https://x/250.jpg", "cover_xl": "https://x/1000.jpg"},
+            {"title": "no cover", "artist": {"name": "A"}},
+        ]});
+        let found = parse_deezer(&json);
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].label.as_str(), found[0].source.as_str()), ("A - B", "Deezer"));
+        assert_eq!(found[0].full, "https://x/1000.jpg");
     }
 
     #[test]

@@ -23,6 +23,38 @@ pub fn lyrics(artist: &str, title: &str) -> Result<Option<String>> {
     Ok(None)
 }
 
+/// Albums Genius lists for `artist` + `album`, as ("Artist - Album", cover url) with the 1000 px
+/// cover. Albums by another artist than the one asked about are left out.
+pub fn albums(artist: &str, album: &str) -> Result<Vec<(String, String)>> {
+    let found = online::get_json(
+        "https://genius.com/api/search/multi",
+        &[("q", &format!("{artist} {album}"))],
+    )?;
+    Ok(album_covers(&found, artist))
+}
+
+fn album_covers(results: &Value, artist: &str) -> Vec<(String, String)> {
+    let want = plain(artist);
+    results["response"]["sections"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|s| s["hits"].as_array().into_iter().flatten())
+        .filter(|hit| hit["type"] == "album")
+        .filter_map(|hit| {
+            let album = &hit["result"];
+            let (name, by, cover) = (
+                album["name"].as_str()?,
+                album["artist"]["name"].as_str()?,
+                album["cover_art_url"].as_str()?,
+            );
+            let by_plain = plain(by);
+            let fits = want.is_empty() || by_plain.contains(&want) || want.contains(&by_plain);
+            (fits && cover.starts_with("https://")).then(|| (format!("{by} - {name}"), cover.to_owned()))
+        })
+        .collect()
+}
+
 /// Only letters and digits, lowercased, so "Don't Stop" and "dont stop" are the same.
 fn plain(text: &str) -> String {
     text.chars()
@@ -188,6 +220,26 @@ fn decode(text: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn album_hits_give_covers_for_the_artist_asked_about() {
+        let hit = |name: &str, by: &str, cover: &str| {
+            json!({"type": "album", "result": {"name": name, "artist": {"name": by}, "cover_art_url": cover}})
+        };
+        let results = json!({"response": {"sections": [
+            {"type": "song", "hits": [{"type": "song", "result": {"title": "x"}}]},
+            {"type": "album", "hits": [
+                hit("Blue", "The Band", "https://images.example/a.1000x1000x1.jpg"),
+                hit("Blue", "Somebody Else", "https://images.example/b.1000x1000x1.jpg"),
+                hit("Plain", "The Band", "http://images.example/c.jpg"),
+            ]},
+        ]}});
+        assert_eq!(
+            album_covers(&results, "the band"),
+            [("The Band - Blue".to_string(), "https://images.example/a.1000x1000x1.jpg".to_string())]
+        );
+        assert_eq!(album_covers(&results, "").len(), 2);
+    }
 
     #[test]
     fn lyrics_are_read_out_of_the_page_without_its_furniture() {
