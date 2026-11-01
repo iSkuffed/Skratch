@@ -20,6 +20,16 @@ use std::{
 use tempfile::Builder;
 use walkdir::WalkDir;
 
+/// Held while a media file is rewritten (tags, cover, lyrics), so two writers never swap in
+/// copies made from the same old file and lose each other's change.
+pub static MEDIA_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The prefix of the temporary copies made while editing a file; scans never index them.
+pub const EDIT_PREFIX: &str = ".skratch-edit-";
+
+/// An editing copy left by a crash; older than this, a scan deletes it.
+const STALE_EDIT: std::time::Duration = std::time::Duration::from_secs(3600);
+
 pub struct Library {
     connection: Connection,
     artwork_dir: PathBuf,
@@ -243,11 +253,15 @@ impl Library {
                 .follow_links(false)
                 .into_iter()
                 .filter_entry(|entry| {
-                    !(entry.file_type().is_dir()
-                        && entry
-                            .file_name()
-                            .to_string_lossy()
-                            .starts_with(".skratch-download-"))
+                    let name = entry.file_name().to_string_lossy();
+                    if entry.file_type().is_dir() {
+                        return !name.starts_with(".skratch-download-");
+                    }
+                    if name.starts_with(EDIT_PREFIX) {
+                        remove_if_stale(entry.path());
+                        return false;
+                    }
+                    true
                 })
             {
                 let entry = match entry {
@@ -469,6 +483,7 @@ impl Library {
     }
 
     pub fn edit(&mut self, id: i64, edit: &MetadataEdit) -> Result<Track> {
+        let _writing = MEDIA_WRITE.lock().unwrap_or_else(|e| e.into_inner());
         let track = track_by_id(&self.connection, id)?;
         validate_edit_filename(&track.path, &edit.filename)?;
         let source_metadata = fs::symlink_metadata(&track.path)
@@ -540,7 +555,7 @@ impl Library {
             .context("media file has no UTF-8 extension")?;
         let suffix = format!(".{extension}");
         let temporary = Builder::new()
-            .prefix(".skratch-edit-")
+            .prefix(EDIT_PREFIX)
             .suffix(&suffix)
             .tempfile_in(parent)
             .context("create temporary media file")?;
@@ -652,6 +667,7 @@ impl Library {
         let mut artwork =
             make_artwork(image, "online".to_owned())?.context("this is not a usable image")?;
         if embed {
+            let _writing = MEDIA_WRITE.lock().unwrap_or_else(|e| e.into_inner());
             let track = track_by_id(&self.connection, id)?;
             embed_cover(&track.path, image)?;
             let metadata = fs::metadata(&track.path).context("inspect edited media file")?;
@@ -705,7 +721,7 @@ fn embed_cover(path: &Path, image: &[u8]) -> Result<()> {
         .and_then(OsStr::to_str)
         .context("media file has no UTF-8 extension")?;
     let temporary = Builder::new()
-        .prefix(".skratch-edit-")
+        .prefix(EDIT_PREFIX)
         .suffix(&format!(".{extension}"))
         .tempfile_in(parent)
         .context("create temporary media file")?;
@@ -979,6 +995,18 @@ fn folder_artwork(directory: &Path, report: &mut ScanReport) -> Option<Artwork> 
         }
     }
     None
+}
+
+/// Deletes an editing copy that a crash left behind, once it is clearly not in use.
+fn remove_if_stale(path: &Path) {
+    let old = fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age > STALE_EDIT);
+    if old {
+        let _ = fs::remove_file(path);
+    }
 }
 
 fn cover_candidates(directory: &Path) -> [PathBuf; 3] {

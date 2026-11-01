@@ -66,12 +66,12 @@ pub fn duplicates(tracks: &[Track]) -> Vec<Vec<usize>> {
     let mut groups = Vec::new();
     for mut same_name in by_name.into_values().filter(|group| group.len() > 1) {
         same_name.sort_by(|a, b| tracks[*a].duration.total_cmp(&tracks[*b].duration));
-        // a run of lengths each within SAME_LENGTH of the one before it is one recording
+        // lengths all within SAME_LENGTH of the shortest in the run are one recording
         let mut run: Vec<usize> = Vec::new();
         for i in same_name {
             if run
-                .last()
-                .is_some_and(|last| tracks[i].duration - tracks[*last].duration > SAME_LENGTH)
+                .first()
+                .is_some_and(|first| tracks[i].duration - tracks[*first].duration > SAME_LENGTH)
             {
                 groups.push(std::mem::take(&mut run));
             }
@@ -178,6 +178,18 @@ mod tests {
         ];
         let groups = duplicates(&tracks);
         assert_eq!(groups, vec![vec![1, 0]], "ordered by album");
+    }
+
+    #[test]
+    fn a_chain_of_close_lengths_is_not_one_recording() {
+        let tracks: Vec<Track> = [200.0, 203.0, 206.0, 209.0]
+            .iter()
+            .map(|d| track("The Band", "Invented Song", "Album", *d))
+            .collect();
+        let groups = duplicates(&tracks);
+        // 200 and 203 are within the tolerance of 200; 206 and 209 are not
+        assert!(groups.iter().all(|g| g.len() < tracks.len()), "{groups:?}");
+        assert_eq!(groups.iter().map(Vec::len).max(), Some(2));
     }
 
     #[test]

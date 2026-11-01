@@ -484,3 +484,20 @@ fn plays_and_ratings_are_kept_across_edits_rescans_and_restarts() {
         (2, Some(2_000), 4)
     );
 }
+
+#[test]
+fn unfinished_editing_copies_are_not_songs() {
+    let temp = tempdir().unwrap();
+    let music = temp.path().join("music");
+    fs::create_dir_all(&music).unwrap();
+    write_wav(&music.join("song.wav"));
+    // what an interrupted lyrics or tag write leaves behind
+    let copy = music.join(".skratch-edit-leftover.wav");
+    write_wav(&copy);
+
+    let mut library = Library::open(&temp.path().join("data")).unwrap();
+    library.add_source(&music).unwrap();
+    assert_eq!(library.scan(false).unwrap().indexed, 1);
+    // a recent copy might still be in use, so it stays
+    assert!(copy.exists());
+}

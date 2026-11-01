@@ -215,6 +215,8 @@ pub struct Skratch {
     playing: bool,
     loaded: bool,
     pending_seek: Option<f64>,
+    /// Player events set aside while a new song was loading, handled before newer ones.
+    replay: VecDeque<PlayerEvent>,
     duration: f64,
     view: View,
     sort: Sort,
@@ -360,6 +362,7 @@ impl Skratch {
             playing: false,
             loaded: false,
             pending_seek: None,
+            replay: VecDeque::new(),
             duration: 0.0,
             view: View::Tracks,
             sort: Sort::Album,
@@ -609,6 +612,13 @@ impl Skratch {
             .and_then(|_| player.load(&track.path));
         match result {
             Ok(()) => {
+                // an end-of-file from the song just replaced may still be queued; it is not
+                // this song's, so it must not move the queue on
+                while let Ok(event) = player.events.try_recv() {
+                    if !matches!(event, PlayerEvent::Ended) {
+                        self.replay.push_back(event);
+                    }
+                }
                 self.listen.restart();
                 self.listen.gain = gain;
                 self.loaded = true;
@@ -777,6 +787,14 @@ impl Skratch {
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
+        self.drain_events();
+        self.keep_playing(ctx);
+        self.art.drain(ctx);
+    }
+
+    /// Takes in what the library worker, the downloader and the folder picker have sent. Also
+    /// run by the watcher while the window is minimised, so snapshots never pile up unread.
+    fn drain_events(&mut self) {
         while let Ok(event) = self.service.events.try_recv() {
             match event {
                 Event::Busy(value) => {
@@ -847,8 +865,6 @@ impl Skratch {
                 _ => {}
             }
         }
-        self.keep_playing(ctx);
-        self.art.drain(ctx);
     }
 
     /// Handles what playback is waiting on: events from mpv (a track ending starts the next
@@ -858,7 +874,10 @@ impl Skratch {
     fn keep_playing(&mut self, ctx: &egui::Context) -> bool {
         let mut changed = false;
         loop {
-            let event = self.player.as_ref().and_then(|p| p.events.try_recv().ok());
+            let event = self
+                .replay
+                .pop_front()
+                .or_else(|| self.player.as_ref().and_then(|p| p.events.try_recv().ok()));
             let Some(event) = event else {
                 break;
             };

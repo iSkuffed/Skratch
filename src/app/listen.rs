@@ -78,6 +78,8 @@ pub struct Listen {
     counted: bool,
     /// The song lined up in mpv behind the one playing.
     pub preloaded: Option<i64>,
+    /// Where that song was when it was lined up; a rename needs it lined up again.
+    preloaded_path: Option<std::path::PathBuf>,
     /// When the position last came in, to estimate where the song is between updates.
     pub pos_at: Instant,
     tick_at: Instant,
@@ -101,6 +103,7 @@ impl Default for Listen {
             listened: 0.0,
             counted: false,
             preloaded: None,
+            preloaded_path: None,
             pos_at: Instant::now(),
             tick_at: Instant::now(),
             job: None,
@@ -117,6 +120,7 @@ impl Listen {
         self.listened = 0.0;
         self.counted = false;
         self.preloaded = None;
+        self.preloaded_path = None;
         self.pos_at = Instant::now();
     }
 
@@ -220,16 +224,20 @@ impl Skratch {
             && self.listen.sleep != Some(Sleep::EndOfSong))
         .then(|| self.state.queue.peek_next())
         .flatten();
-        if want != self.listen.preloaded {
-            let path = want.and_then(|id| Some(self.tracks[*self.by_id.get(&id)?].path.clone()));
-            if let Some(player) = self.player.as_mut() {
-                if self.listen.preloaded.is_some() {
-                    let _ = player.clear_preload();
-                }
-                self.listen.preloaded = match path {
-                    Some(path) if player.preload(&path).is_ok() => want,
-                    _ => None,
-                };
+        let path = want.and_then(|id| Some(self.tracks[*self.by_id.get(&id)?].path.clone()));
+        if (want != self.listen.preloaded || path != self.listen.preloaded_path)
+            && let Some(player) = self.player.as_mut()
+        {
+            if self.listen.preloaded.is_some() {
+                let _ = player.clear_preload();
+            }
+            self.listen.preloaded = None;
+            self.listen.preloaded_path = None;
+            if let Some(path) = path
+                && player.preload(&path).is_ok()
+            {
+                self.listen.preloaded = want;
+                self.listen.preloaded_path = Some(path);
             }
         }
     }

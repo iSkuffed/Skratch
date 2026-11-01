@@ -126,7 +126,7 @@ pub fn strip_noise(stem: &str) -> String {
 /// Pulls a featured-artist credit out of `stem`, returning the stem without it.
 fn split_feat(stem: &str) -> (String, Option<String>) {
     const MARKERS: [&str; 6] = ["ft.", "feat.", "featuring", "ft ", "feat ", "with "];
-    let lower = stem.to_lowercase();
+    let lower = stem.to_ascii_lowercase(); // same byte offsets as `stem`
     let mut best: Option<(usize, usize, bool)> = None; // (marker start, text start, bracketed)
     for marker in MARKERS {
         for (at, _) in lower.match_indices(marker) {
@@ -306,5 +306,13 @@ mod tests {
         assert!(parse("{artist} - {title}", "NoSeparatorHere").is_none());
         assert!(parse("{artist}{title}", "A - B").is_none());
         assert!(parse("{artist} - {title}", " - Title").is_none());
+    }
+
+    #[test]
+    fn accented_names_do_not_break_the_featured_split() {
+        // lowercasing used to change byte lengths and cut a character in half
+        let (title, feat) = split_feat("Ké ft. X");
+        assert_eq!(title, "Ké");
+        assert_eq!(feat.as_deref(), Some("X"));
     }
 }

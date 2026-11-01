@@ -125,6 +125,7 @@ impl Artwork {
                 if let Some(old) = self.order.pop_front() {
                     self.textures.remove(&old);
                     self.glows.remove(&old);
+                    self.accents.remove(&old);
                     self.stamps.remove(&old);
                 }
             }

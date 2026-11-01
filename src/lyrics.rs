@@ -553,6 +553,14 @@ pub enum Embedded {
 /// Writes the track's local lyrics (never the network) into the audio file's own tag, synced
 /// ones as LRC text so players that read the tag still get the stamps.
 pub fn embed(track: &Track, dir: &Path) -> Result<Embedded> {
+    // one writer at a time, and only on a file that is still where the library saw it
+    let _writing = crate::library::MEDIA_WRITE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    anyhow::ensure!(
+        track.path.is_file(),
+        "the song was moved or renamed; try again"
+    );
     // find() with no online access is the local chain: yours, sidecar, tags, then the cache
     let found = find(track, dir, Online::default());
     let Some(lyrics) = found.lyrics else {
@@ -596,7 +604,7 @@ pub fn embed(track: &Track, dir: &Path) -> Result<Embedded> {
         .and_then(std::ffi::OsStr::to_str)
         .context("audio file has no UTF-8 extension")?;
     let temporary = tempfile::Builder::new()
-        .prefix(".skratch-edit-")
+        .prefix(crate::library::EDIT_PREFIX)
         .suffix(&format!(".{extension}"))
         .tempfile_in(parent)
         .context("create temporary media file")?;

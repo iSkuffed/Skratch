@@ -5,6 +5,7 @@ use skratch::{
 };
 use std::{
     any::Any,
+    hash::{DefaultHasher, Hash, Hasher},
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     sync::{
@@ -14,6 +15,24 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+/// A fingerprint of a library snapshot, so a rescan that found nothing new is not sent to the
+/// window again (a minimised window would otherwise let a full copy pile up every 30 seconds).
+fn fingerprint(sources: &[PathBuf], tracks: &[Track]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    sources.hash(&mut hasher);
+    for t in tracks {
+        (
+            t.id,
+            &t.path,
+            (&t.title, &t.artist, &t.album, &t.album_artist, &t.genre),
+            (t.year, t.track_number, t.disc_number, t.duration.to_bits()),
+            (&t.artwork, t.plays, t.last_played, t.rating),
+        )
+            .hash(&mut hasher);
+    }
+    hasher.finish()
+}
 
 pub enum Command {
     Refresh,
@@ -102,9 +121,17 @@ impl Service {
             let mut force = false;
             let mut changed_at = None;
             let mut last_periodic = Instant::now();
+            let mut last_sent = None;
+            let mut send_snapshot = |sources: Vec<PathBuf>, tracks: Vec<Track>| {
+                let print = fingerprint(&sources, &tracks);
+                if last_sent != Some(print) {
+                    last_sent = Some(print);
+                    send(Event::Snapshot(sources, tracks));
+                }
+            };
             // Show the cached library immediately while the startup scan runs.
             if let (Ok(sources), Ok(tracks)) = (library.sources(), library.tracks()) {
-                send(Event::Snapshot(sources, tracks));
+                send_snapshot(sources, tracks);
             }
             loop {
                 if rescan {
@@ -136,7 +163,7 @@ impl Service {
                                     }
                                 }
                             }
-                            send(Event::Snapshot(sources, tracks));
+                            send_snapshot(sources, tracks);
                         }
                         (Err(e), _) | (_, Err(e)) => {
                             send(Event::Message(format!("Cannot read library: {e:#}")))

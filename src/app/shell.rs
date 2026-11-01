@@ -33,6 +33,7 @@ impl Watched for Skratch {
     }
 
     fn step(&mut self, ctx: &egui::Context) -> bool {
+        self.drain_events();
         self.keep_playing(ctx)
     }
 }
