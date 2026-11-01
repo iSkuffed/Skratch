@@ -49,6 +49,7 @@ enum Quick {
     Automatic,
     Type,
     Import,
+    Clear,
     ToggleLyrics,
     Style(VizStyle),
     VizOff,
@@ -66,6 +67,7 @@ impl Quick {
             Self::Automatic => "Drop the lyrics typed, imported or cleared and look again",
             Self::Type => "Type the lyrics in yourself",
             Self::Import => "Bring the lyrics in from a .lrc or .txt file",
+            Self::Clear => "Wrong lyrics: forget them and stop looking for this track",
             Self::ToggleLyrics => "Show or hide the lyrics",
             Self::Style(_) => "Draw the visualizer this way",
             Self::VizOff => "Turn the visualizer off",
@@ -564,6 +566,7 @@ impl Skratch {
                 (first.0, first.1, false),
                 (Quick::Type, "Type", false),
                 (Quick::Import, "Import", false),
+                (Quick::Clear, "Clear", false),
                 (
                     Quick::ToggleLyrics,
                     if cfg.lyrics { "Hide" } else { "Show" },
@@ -599,6 +602,7 @@ impl Skratch {
             }
             Quick::Type => self.lyrics.editing = Some(String::new()),
             Quick::Import => self.import_lyrics_file(ctx),
+            Quick::Clear => self.save_lyrics(&dir, track, ""),
             Quick::ToggleLyrics => self.state.visualizer.lyrics = !self.state.visualizer.lyrics,
             Quick::Style(style) => {
                 self.state.visualizer.style = style;
@@ -874,16 +878,16 @@ impl Skratch {
                 });
                 acted = true;
             }
-            if ui.button("Import from file...").clicked() {
-                self.import_lyrics_file(ui.ctx());
-                acted = true;
-            }
             if ui
                 .button("Clear lyrics")
                 .on_hover_text("Wrong lyrics: forget them and stop looking for this track")
                 .clicked()
             {
                 self.save_lyrics(&dir, track, "");
+                acted = true;
+            }
+            if ui.button("Import from file...").clicked() {
+                self.import_lyrics_file(ui.ctx());
                 acted = true;
             }
         });
