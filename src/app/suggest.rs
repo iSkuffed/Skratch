@@ -1,6 +1,6 @@
 //! Suggested fixes: songs that lack tags or a cover are looked up online, and what turns up is
 //! offered in a card on the Now playing page, one song at a time, to apply or turn down.
-use super::{Skratch, listen::now_secs};
+use super::{Skratch, listen::now_secs, tidyrow};
 use crate::{service::Command, style};
 use eframe::egui::{self, Color32, CornerRadius, Rect, RichText, Sense, Stroke, pos2, vec2};
 use skratch::{
@@ -402,6 +402,44 @@ impl Skratch {
         );
     }
 
+    /// Which of a song's waiting choices is shown, and the small picture of its cover; the
+    /// picture is made from what was found, or fetched again once if it came from an earlier run.
+    pub(super) fn choice_view(
+        &mut self,
+        ctx: &egui::Context,
+        id: i64,
+    ) -> Option<(usize, Option<egui::TextureId>)> {
+        let choices = self.suggest.store.waiting.get(&id)?;
+        let view = self.suggest.shown.get_mut(&id)?;
+        let shown = view.choice.min(choices.len() - 1);
+        view.choice = shown;
+        let choice = &choices[shown];
+        if view.textures[shown].is_none()
+            && let Some(image) = &choice.thumb
+        {
+            view.textures[shown] = Some(ctx.load_texture(
+                format!("suggest-{id}-{shown}"),
+                image.clone(),
+                egui::TextureOptions::LINEAR,
+            ));
+        }
+        if view.textures[shown].is_none()
+            && !view.thumb_asked[shown]
+            && let Some(cover) = choice.cover.clone()
+        {
+            view.thumb_asked[shown] = true;
+            let (tx, wake) = (self.suggest.tx.clone(), self.wake.clone());
+            std::thread::spawn(move || {
+                let _ = tx.send(Done::Thumb(id, shown, suggest::thumbnail(&cover)));
+                wake();
+            });
+        }
+        Some((
+            shown,
+            view.textures[shown].as_ref().map(egui::TextureHandle::id),
+        ))
+    }
+
     /// The card in the corner of the Now playing page: what was found online for the song, with
     /// buttons to take it (or, right after, to undo it). It keeps its place and size; only its
     /// contents change.
@@ -416,38 +454,14 @@ impl Skratch {
             return;
         }
         let accent = self.accent;
+        let Some((shown, texture)) = self.choice_view(ui.ctx(), track.id) else {
+            return;
+        };
         let Some(choices) = self.suggest.store.waiting.get(&track.id) else {
             return;
         };
-        let Some(view) = self.suggest.shown.get_mut(&track.id) else {
-            return;
-        };
         let count = choices.len();
-        view.choice = view.choice.min(count - 1);
-        let shown = view.choice;
         let choice = &choices[shown];
-        if view.textures[shown].is_none()
-            && let Some(image) = &choice.thumb
-        {
-            view.textures[shown] = Some(ui.ctx().load_texture(
-                format!("suggest-{}-{shown}", track.id),
-                image.clone(),
-                egui::TextureOptions::LINEAR,
-            ));
-        }
-        // a picture from an earlier run is fetched again, once
-        if view.textures[shown].is_none()
-            && !view.thumb_asked[shown]
-            && let Some(cover) = choice.cover.clone()
-        {
-            view.thumb_asked[shown] = true;
-            let (tx, wake, id) = (self.suggest.tx.clone(), self.wake.clone(), track.id);
-            std::thread::spawn(move || {
-                let _ = tx.send(Done::Thumb(id, shown, suggest::thumbnail(&cover)));
-                wake();
-            });
-        }
-        let texture = view.textures[shown].clone();
         let (has_tags, has_cover) = (!choice.changes.is_empty(), choice.cover.is_some());
         let mut step = 0_i32;
         let mut answer = None;
@@ -486,9 +500,9 @@ impl Skratch {
                 });
             });
             ui.horizontal_top(|ui| {
-                if let Some(texture) = &texture {
+                if let Some(texture) = texture {
                     ui.add(
-                        egui::Image::new((texture.id(), vec2(58.0, 58.0)))
+                        egui::Image::new((texture, vec2(58.0, 58.0)))
                             .corner_radius(CornerRadius::same(6)),
                     );
                 }
@@ -660,69 +674,105 @@ impl Skratch {
         ui.separator();
         let mut answers: Vec<(i64, Answer)> = Vec::new();
         let mut next: Vec<(i64, i32)> = Vec::new();
-        let height = 46.0;
-        style::scroll()
-            .id_salt("tidy-suggest")
-            .show_rows(ui, height, rows.len(), |ui, range| {
+        let accent = self.accent;
+        style::scroll().id_salt("tidy-suggest").show_rows(
+            ui,
+            tidyrow::ROW,
+            rows.len(),
+            |ui, range| {
                 for (_, id) in &rows[range] {
-                    let Some(track) = self.by_id.get(id).map(|i| &self.tracks[*i]) else {
+                    let Some(track) = self.by_id.get(id).map(|i| self.tracks[*i].clone()) else {
                         continue;
                     };
+                    let Some((at, new_cover)) = self.choice_view(ui.ctx(), *id) else {
+                        continue;
+                    };
+                    let old_cover = self.cover_of(&track);
                     let choices = &self.suggest.store.waiting[id];
-                    let at = self
-                        .suggest
-                        .shown
-                        .get(id)
-                        .map_or(0, |s| s.choice)
-                        .min(choices.len() - 1);
+                    let count = choices.len();
                     let choice = &choices[at];
-                    ui.allocate_ui_with_layout(
-                        vec2(ui.available_width(), height - 4.0),
-                        egui::Layout::left_to_right(egui::Align::Center),
+                    let (has_tags, has_cover) =
+                        (!choice.changes.is_empty(), choice.cover.is_some());
+                    tidyrow::card(
+                        ui,
+                        tidyrow::ROW,
+                        176.0,
                         |ui| {
-                            if ui.button("Apply").clicked() {
-                                answers.push((*id, Answer::Apply(Take::All)));
-                            }
-                            if ui
-                                .button("Never")
-                                .on_hover_text("Never suggest anything for this song")
-                                .clicked()
-                            {
-                                answers.push((*id, Answer::Never));
-                            }
-                            if choices.len() > 1
-                                && ui
-                                    .small_button(format!("{}/{}", at + 1, choices.len()))
-                                    .on_hover_text("Show the next match")
+                            ui.horizontal_top(|ui| {
+                                tidyrow::cover(ui, old_cover, "No cover");
+                                if has_cover {
+                                    tidyrow::arrow(ui);
+                                    tidyrow::cover(ui, new_cover, "Loading");
+                                }
+                                ui.vertical(|ui| {
+                                    tidyrow::identity(ui, &track);
+                                    tidyrow::changes(ui, choice, old_cover.is_some(), accent);
+                                });
+                            });
+                        },
+                        |ui| {
+                            ui.horizontal(|ui| {
+                                let apply = ui.add(
+                                    egui::Button::new(RichText::new("Apply").color(Color32::BLACK))
+                                        .fill(accent),
+                                );
+                                if apply
+                                    .on_hover_text(
+                                        "Write these tags and the cover into the song's file",
+                                    )
                                     .clicked()
-                            {
-                                next.push((*id, 1));
-                            }
-                            ui.vertical(|ui| {
-                                ui.spacing_mut().item_spacing.y = 1.0;
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(format!(
-                                            "{} - {}",
-                                            track.artist, track.title
-                                        ))
-                                        .color(style::CREAM),
-                                    )
-                                    .truncate(),
-                                );
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(summary(choice))
+                                {
+                                    answers.push((*id, Answer::Apply(Take::All)));
+                                }
+                                let more = chevron(ui, Way::Down);
+                                egui::Popup::menu(&more).show(|ui| {
+                                    if ui
+                                        .add_enabled(has_tags, egui::Button::new("Just the tags"))
+                                        .clicked()
+                                    {
+                                        answers.push((*id, Answer::Apply(Take::Tags)));
+                                    }
+                                    if ui
+                                        .add_enabled(has_cover, egui::Button::new("Just the cover"))
+                                        .clicked()
+                                    {
+                                        answers.push((*id, Answer::Apply(Take::Cover)));
+                                    }
+                                });
+                            });
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .button("Never")
+                                    .on_hover_text("Never suggest anything for this song")
+                                    .clicked()
+                                {
+                                    answers.push((*id, Answer::Never));
+                                }
+                                if count > 1 {
+                                    if chevron(ui, Way::Left)
+                                        .on_hover_text("Previous match")
+                                        .clicked()
+                                    {
+                                        next.push((*id, -1));
+                                    }
+                                    ui.label(
+                                        RichText::new(format!("{}/{count}", at + 1))
                                             .size(12.0)
-                                            .color(style::CREAM_DIM),
-                                    )
-                                    .truncate(),
-                                );
+                                            .color(style::CREAM),
+                                    );
+                                    if chevron(ui, Way::Right)
+                                        .on_hover_text("Next match")
+                                        .clicked()
+                                    {
+                                        next.push((*id, 1));
+                                    }
+                                }
                             });
                         },
                     );
                 }
-            });
+            },
+        );
         for (id, step) in next {
             if let Some(view) = self.suggest.shown.get_mut(&id) {
                 let count = self.suggest.store.waiting[&id].len() as i32;
@@ -745,23 +795,40 @@ impl Skratch {
             );
             return;
         }
-        let rows: Vec<(i64, String, String)> = self
+        let rows: Vec<(i64, String, suggest::Choice)> = self
             .suggest
             .store
             .applied
             .iter()
             .rev()
-            .map(|a| (a.id, a.label.clone(), summary(&a.choice)))
+            .map(|a| (a.id, a.label.clone(), a.choice.clone()))
             .collect();
         let mut undo = None;
-        let height = 46.0;
+        let accent = self.accent;
         style::scroll()
             .id_salt("tidy-applied")
-            .show_rows(ui, height, rows.len(), |ui, range| {
-                for (id, label, text) in &rows[range] {
-                    ui.allocate_ui_with_layout(
-                        vec2(ui.available_width(), height - 4.0),
-                        egui::Layout::left_to_right(egui::Align::Center),
+            .show_rows(ui, tidyrow::ROW, rows.len(), |ui, range| {
+                for (id, label, choice) in &rows[range] {
+                    let track = self.by_id.get(id).map(|i| self.tracks[*i].clone());
+                    let picture = track.as_ref().and_then(|t| self.cover_of(t));
+                    tidyrow::card(
+                        ui,
+                        tidyrow::ROW,
+                        90.0,
+                        |ui| {
+                            ui.horizontal_top(|ui| {
+                                tidyrow::cover(ui, picture, "No cover");
+                                ui.vertical(|ui| {
+                                    match &track {
+                                        Some(track) => tidyrow::identity(ui, track),
+                                        None => {
+                                            ui.label(RichText::new(label).color(style::CREAM));
+                                        }
+                                    }
+                                    tidyrow::changes(ui, choice, false, accent);
+                                });
+                            });
+                        },
                         |ui| {
                             if ui
                                 .button("Undo")
@@ -770,14 +837,6 @@ impl Skratch {
                             {
                                 undo = Some(*id);
                             }
-                            ui.vertical(|ui| {
-                                ui.spacing_mut().item_spacing.y = 1.0;
-                                ui.add(egui::Label::new(RichText::new(label).color(style::CREAM)).truncate());
-                                ui.add(
-                                    egui::Label::new(RichText::new(text).size(12.0).color(style::CREAM_DIM))
-                                        .truncate(),
-                                );
-                            });
                         },
                     );
                 }
@@ -786,19 +845,6 @@ impl Skratch {
             self.undo_suggestion(id);
         }
     }
-}
-
-/// What a choice changes, on one line.
-fn summary(choice: &Choice) -> String {
-    let mut parts: Vec<String> = choice
-        .changes
-        .iter()
-        .map(|c| format!("{}: {}", c.field, c.to))
-        .collect();
-    if choice.cover.is_some() {
-        parts.push("Cover".to_owned());
-    }
-    parts.join("  ·  ")
 }
 
 /// The lines of a card: each change, and the cover.

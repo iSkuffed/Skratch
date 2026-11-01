@@ -32,6 +32,7 @@ mod playing;
 mod setup;
 mod shell;
 mod suggest;
+mod tidyrow;
 mod visualizer;
 
 pub use shell::Shell;
@@ -1872,6 +1873,13 @@ impl Skratch {
 
     /// What can be done with tracks, shared by the Select bar (`menu` false, as buttons) and the
     /// right-click menu (`menu` true), so both always offer the same things.
+    /// An "Actions" button that opens the track menu for `ids`, for bars too narrow to lay the
+    /// whole menu out in a row.
+    pub(super) fn actions_button(&mut self, ui: &mut egui::Ui, ids: &[i64]) {
+        let button = ui.button("Actions...");
+        egui::Popup::menu(&button).show(|ui| self.track_actions(ui, ids, true));
+    }
+
     fn track_actions(&mut self, ui: &mut egui::Ui, ids: &[i64], menu: bool) {
         let some = !ids.is_empty();
         // the dialogs below work on the selection, so make it exactly these tracks
@@ -2037,7 +2045,7 @@ impl Skratch {
                 }
                 ui.label(format!("{} selected", self.selected.len()));
                 let picked = self.selected_ids();
-                self.track_actions(ui, &picked, false);
+                self.actions_button(ui, &picked);
             }
         });
     }

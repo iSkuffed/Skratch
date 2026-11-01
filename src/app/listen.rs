@@ -1,6 +1,6 @@
 //! Listening: what has been played and rated, the sleep timer, fades and gapless playback, the
 //! background lyrics jobs, the playback settings and the "Tidy up" page.
-use super::{Action, Skratch, View, display, time};
+use super::{Action, Skratch, View, display, tidyrow, time};
 use crate::{
     service::Command,
     state::Show,
@@ -605,10 +605,6 @@ impl Skratch {
     pub(super) fn tidy_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(10.0);
         ui.heading(View::Tidy.title());
-        ui.label(
-            RichText::new("Finds songs that are in your library twice, tags that look unfinished and fixes found online. Exclude takes a song out of Skratch and leaves the file alone; Delete removes the file from the disk for good.")
-                .color(style::CREAM_DIM),
-        );
         ui.add_space(8.0);
         if self.listen.tidy.is_none() {
             self.listen.tidy = Some(self.tidy_data());
@@ -636,7 +632,21 @@ impl Skratch {
                 format!("Excluded ({})", self.excluded.len()),
             );
         });
-        ui.separator();
+        let hint = match self.listen.tidy_tab {
+            TidyTab::Copies => {
+                "The same song twice. Exclude hides a file from Skratch and keeps it on the disk; Delete removes it for good."
+            }
+            TidyTab::Tags => {
+                "Songs whose tags look unfinished. Edit one, or use the buttons for all of them at once."
+            }
+            TidyTab::Suggestions => {
+                "Found online for songs that lack an album, year, track number or cover. Nothing is written until you press Apply."
+            }
+            TidyTab::Excluded => "Songs Skratch skips. Their files are still on the disk.",
+        };
+        ui.add_space(4.0);
+        ui.label(RichText::new(hint).size(12.0).color(style::CREAM_DIM));
+        ui.add_space(4.0);
         match self.listen.tidy_tab {
             TidyTab::Copies => self.copies_page(ui, &tidy),
             TidyTab::Tags => self.loose_page(ui, &tidy),
@@ -655,26 +665,39 @@ impl Skratch {
             ui.label("No song appears twice. Two files count as the same song when their title and artist match once filler like \"(Official Video)\" is ignored, and they are within a few seconds of the same length.");
             return;
         }
-        let height = 28.0;
-        style::scroll().id_salt("tidy-copies").show_rows(
-            ui,
-            height,
-            tidy.copies.len(),
-            |ui, range| {
-                for row in &tidy.copies[range] {
-                    ui.allocate_ui_with_layout(
-                        vec2(ui.available_width(), height - 4.0),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| match row {
+        let heights: Vec<f32> = tidy
+            .copies
+            .iter()
+            .map(|row| match row {
+                CopyRow::Header(_) => tidyrow::HEAD,
+                CopyRow::Track(..) => tidyrow::ROW,
+            })
+            .collect();
+        let total: f32 = heights.iter().sum();
+        style::scroll()
+            .id_salt("tidy-copies")
+            .show_viewport(ui, |ui, view| {
+                ui.set_height(total);
+                let (left, width) = (ui.min_rect().min, ui.available_width());
+                let mut top = 0.0;
+                for (row, height) in tidy.copies.iter().zip(&heights) {
+                    // only the rows in view are drawn; the rest are skipped by their height
+                    if top + height >= view.min.y && top <= view.max.y {
+                        let rect =
+                            egui::Rect::from_min_size(left + vec2(0.0, top), vec2(width, *height));
+                        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| match row {
                             CopyRow::Header(text) => {
-                                ui.label(RichText::new(text).strong().color(style::CREAM));
+                                ui.add_space(10.0);
+                                ui.label(
+                                    RichText::new(text).strong().size(14.0).color(style::CREAM),
+                                );
                             }
                             CopyRow::Track(i, others) => self.tidy_track(ui, *i, None, others),
-                        },
-                    );
+                        });
+                    }
+                    top += height;
                 }
-            },
-        );
+            });
     }
 
     fn loose_page(&mut self, ui: &mut egui::Ui, tidy: &Tidy) {
@@ -718,26 +741,24 @@ impl Skratch {
         let ids: Vec<i64> = rows.iter().map(|(i, _)| self.tracks[*i].id).collect();
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("For all {} listed:", ids.len()));
-            self.track_actions(ui, &ids, false);
+            self.actions_button(ui, &ids);
         });
         ui.separator();
-        let height = 28.0;
-        style::scroll()
-            .id_salt("tidy-loose")
-            .show_rows(ui, height, rows.len(), |ui, range| {
+        style::scroll().id_salt("tidy-loose").show_rows(
+            ui,
+            tidyrow::ROW,
+            rows.len(),
+            |ui, range| {
                 for (i, found) in rows[range].iter().copied() {
                     let note = found
                         .iter()
                         .map(|p| p.label())
                         .collect::<Vec<_>>()
                         .join(", ");
-                    ui.allocate_ui_with_layout(
-                        vec2(ui.available_width(), height - 4.0),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| self.tidy_track(ui, *i, Some(note), &[]),
-                    );
+                    self.tidy_track(ui, *i, Some(note), &[]);
                 }
-            });
+            },
+        );
     }
 
     fn excluded_page(&mut self, ui: &mut egui::Ui) {
@@ -780,9 +801,10 @@ impl Skratch {
             });
     }
 
-    /// One track on the Tidy page: what it is, a note, and buttons to play or edit it.
-    /// `others` are the other copies of the same song (duplicates page), which "keep only this
-    /// one" takes out.
+    /// One track on the Tidy page, as a card: its cover and who it is, then what is wrong with
+    /// it (or where the copy lives), and buttons to play, edit, exclude or delete it. `others`
+    /// are the other copies of the same song (duplicates page), which "keep only this one"
+    /// takes out.
     fn tidy_track(
         &mut self,
         ui: &mut egui::Ui,
@@ -790,65 +812,92 @@ impl Skratch {
         note: Option<String>,
         others: &[i64],
     ) {
-        let track = &self.tracks[index];
-        let (id, title, album, length) = (
-            track.id,
-            track.title.clone(),
-            display(&track.album, "Unknown album").to_owned(),
-            track.duration,
-        );
-        let name = track
-            .path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        let path = track.path.display().to_string();
-        let artist = display(&track.artist, "Unknown artist").to_owned();
-        if ui.small_button("Play").clicked() {
-            self.action = Some(Action::StartLibrary(id));
-        }
-        if ui.small_button("Edit").clicked() {
-            self.action = Some(Action::Edit(id));
-        }
-        if !others.is_empty() {
-            if ui
-                .small_button("Keep only this")
-                .on_hover_text("Exclude the other copies of this song. Their files stay on the disk; Excluded brings them back.")
-                .clicked()
-            {
-                self.command(Command::Exclude(others.to_vec()));
-            }
-            if confirm_button(
-                ui,
-                "Delete others",
-                "This will delete the other copies from the disk and keep this one. This CAN NOT be undone. Are you sure?",
-                "Yes, delete them",
-            ) {
-                self.command(Command::Delete(others.to_vec()));
-            }
-        }
-        if ui
-            .small_button("Exclude")
-            .on_hover_text("Take it out of Skratch. The file stays on the disk and scans skip it; Excluded lists it to bring back.")
-            .clicked()
-        {
-            self.command(Command::Exclude(vec![id]));
-        }
-        if confirm_button(
-            ui,
-            "Delete",
-            "This will delete the file from the disk. This CAN NOT be undone. Are you sure?",
-            "Yes, delete",
-        ) {
-            self.command(Command::Delete(vec![id]));
-        }
-        let text = match &note {
-            Some(note) => format!("{title}  -  {artist}   ({note})"),
-            None => format!("{album}  ·  {}  ·  {name}", time(length)),
+        let track = self.tracks[index].clone();
+        let id = track.id;
+        let picture = self.cover_of(&track);
+        let accent = self.accent;
+        let place = {
+            let kind = track
+                .path
+                .extension()
+                .map(|e| e.to_string_lossy().to_uppercase())
+                .unwrap_or_default();
+            let folder = track.path.parent().map(|p| p.display().to_string());
+            format!("{kind}  ·  {}", folder.unwrap_or_default())
         };
-        ui.add(egui::Label::new(RichText::new(text).color(style::CREAM_DIM)).truncate())
-            .on_hover_text(path);
+        tidyrow::card(
+            ui,
+            tidyrow::ROW,
+            236.0,
+            |ui| {
+                ui.horizontal_top(|ui| {
+                    tidyrow::cover(ui, picture, "No cover");
+                    ui.vertical(|ui| {
+                        tidyrow::identity(ui, &track);
+                        match &note {
+                            Some(note) => ui.add(
+                                egui::Label::new(
+                                    RichText::new(format!("Needs: {note}"))
+                                        .size(12.0)
+                                        .color(accent),
+                                )
+                                .truncate(),
+                            ),
+                            None => ui.add(
+                                egui::Label::new(
+                                    RichText::new(place).size(12.0).color(style::CREAM_DIM),
+                                )
+                                .truncate(),
+                            ),
+                        };
+                    });
+                });
+            },
+            |ui| {
+                ui.horizontal(|ui| {
+                    if ui.small_button("Play").clicked() {
+                        self.action = Some(Action::StartLibrary(id));
+                    }
+                    if ui.small_button("Edit").clicked() {
+                        self.action = Some(Action::Edit(id));
+                    }
+                    if ui
+                        .small_button("Exclude")
+                        .on_hover_text("Take it out of Skratch. The file stays on the disk and scans skip it; Excluded lists it to bring back.")
+                        .clicked()
+                    {
+                        self.command(Command::Exclude(vec![id]));
+                    }
+                    if confirm_button(
+                        ui,
+                        "Delete",
+                        "This will delete the file from the disk. This CAN NOT be undone. Are you sure?",
+                        "Yes, delete",
+                    ) {
+                        self.command(Command::Delete(vec![id]));
+                    }
+                });
+                if !others.is_empty() {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .small_button("Keep only this")
+                            .on_hover_text("Exclude the other copies of this song. Their files stay on the disk; Excluded brings them back.")
+                            .clicked()
+                        {
+                            self.command(Command::Exclude(others.to_vec()));
+                        }
+                        if confirm_button(
+                            ui,
+                            "Delete others",
+                            "This will delete the other copies from the disk and keep this one. This CAN NOT be undone. Are you sure?",
+                            "Yes, delete them",
+                        ) {
+                            self.command(Command::Delete(others.to_vec()));
+                        }
+                    });
+                }
+            },
+        );
     }
 }
 
