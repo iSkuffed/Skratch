@@ -273,6 +273,17 @@ impl Player {
             .context("queue next file in mpv")
     }
 
+    /// Makes mpv play the current file over and over instead of ending it.
+    pub fn set_loop(&mut self, on: bool) -> Result<()> {
+        let value = if on { "inf" } else { "no" };
+        self.command(vec![
+            json!("set_property"),
+            json!("loop-file"),
+            json!(value),
+        ])
+        .context("set mpv loop")
+    }
+
     /// Forgets anything queued with `preload`.
     pub fn clear_preload(&mut self) -> Result<()> {
         self.command(vec![json!("playlist-clear")])

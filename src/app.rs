@@ -937,6 +937,9 @@ impl Skratch {
                     if self.listen.sleep == Some(listen::Sleep::EndOfSong) {
                         self.listen.sleep = None;
                         self.stop();
+                    } else if self.lyrics.editing.is_some() {
+                        // never move on from the song whose lyrics are open for editing
+                        self.start_current(0.0);
                     } else if let Some(next) = self.state.queue.advance(true) {
                         // mpv has already moved on to a song lined up for it
                         if self.listen.preloaded == Some(next) {

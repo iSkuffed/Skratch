@@ -73,6 +73,8 @@ pub struct Listen {
     pub sleep: Option<Sleep>,
     /// The fade last given to mpv, so it is only told when it changes.
     pub gain: f64,
+    /// Whether mpv was told to loop the song (while lyrics are being edited).
+    looping: bool,
     /// Seconds of the playing song actually heard, for counting a play.
     listened: f64,
     counted: bool,
@@ -102,6 +104,7 @@ impl Default for Listen {
         Self {
             sleep: None,
             gain: 1.0,
+            looping: false,
             listened: 0.0,
             counted: false,
             preloaded: None,
@@ -129,6 +132,7 @@ impl Listen {
     /// A fresh mpv has no fade applied.
     pub fn new_player(&mut self) {
         self.gain = 1.0;
+        self.looping = false;
     }
 }
 
@@ -220,7 +224,16 @@ impl Skratch {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
 
+        // while lyrics are being edited the song goes round again, so the editor is not left
+        let editing = self.lyrics.editing.is_some();
+        if editing != self.listen.looping
+            && let Some(player) = self.player.as_mut()
+            && player.set_loop(editing).is_ok()
+        {
+            self.listen.looping = editing;
+        }
         let want = (!self.state.gapless_off
+            && !editing
             && duration > 0.0
             && duration - at <= PRELOAD_AHEAD
             && self.listen.sleep != Some(Sleep::EndOfSong))
