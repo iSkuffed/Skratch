@@ -27,6 +27,7 @@ use std::{
 mod fetch;
 mod listen;
 mod lyricview;
+mod photos;
 mod playing;
 mod setup;
 mod shell;
@@ -230,6 +231,8 @@ pub struct Skratch {
     busy: bool,
     busy_since: Option<std::time::Instant>,
     messages: Vec<String>,
+    /// The message on show and when it appeared (egui time), so it can go away by itself.
+    message_shown: Option<(String, f64)>,
     editor: Option<Editor>,
     source_text: String,
     folder_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
@@ -288,6 +291,7 @@ pub struct Skratch {
     lyrics: lyrics::Lookup,
     /// The lyric line that was being sung when the logo last checked it, and when it started
     /// scratching (egui time) after a line that says "scratch".
+    photos: photos::Photos,
     scratch_line: Option<usize>,
     scratch_at: Option<f64>,
     /// The track the Now playing list was last scrolled to, so it follows track changes.
@@ -356,6 +360,7 @@ impl Skratch {
         };
         let setup = (!state.setup_done).then(|| setup::Setup::new(false));
         let suggest = suggest::Suggest::new(wake.clone(), &data_dir);
+        let photos = photos::Photos::new(&data_dir, wake.clone());
         let mut app = Self {
             service: service::Service::start(data_dir.clone(), wake.clone()),
             tracks: Vec::new(),
@@ -389,6 +394,7 @@ impl Skratch {
             busy: false,
             busy_since: None,
             messages,
+            message_shown: None,
             editor: None,
             source_text: String::new(),
             folder_rx: None,
@@ -426,6 +432,7 @@ impl Skratch {
             reactive: Reactive::default(),
             viz: Default::default(),
             lyrics: lyrics::Lookup::default(),
+            photos,
             scratch_line: None,
             scratch_at: None,
             listed: None,
@@ -1188,6 +1195,8 @@ impl Skratch {
         .on_hover_text("Last, when the others have nothing: genius.com is asked with the artist and title and its song page is read for the words. Plain lyrics only, no timing. Genius's terms do not allow automated use, so this is off until you switch it on.");
         ui.checkbox(&mut self.state.cover_genius, "Also look for covers on Genius")
             .on_hover_text("Cover searches (the Find cover online window and suggested covers) also ask genius.com for album covers, with the artist and album. Genius's terms do not allow automated use, so this is off until you switch it on. Covers from it are labelled Genius.");
+        ui.checkbox(&mut self.state.artist_photos, "Artist photos on the Artists page")
+            .on_hover_text("Each artist's name is sent to Deezer, which answers with a picture; the pictures are kept in Skratch's own data and never touch your music folders. Off until you switch it on.");
         ui.checkbox(&mut self.state.lyrics_embed, "Save lyrics into song files")
             .on_hover_text("Once a song has been played through, and when you look lyrics up for many songs, the lyrics Skratch holds for it are also written into the audio file's own tags. This changes your files, so it is off until you switch it on.");
         let mut suggest = !self.state.suggest_off;
@@ -1948,6 +1957,52 @@ impl Skratch {
             self.action = Some(Action::FindCover(ids.to_vec()));
             done = true;
         }
+        if menu {
+            ui.separator();
+        }
+        if ui
+            .add_enabled(some, egui::Button::new("Remove from library"))
+            .on_hover_text("Take these songs out of Skratch and keep scans from finding them again. The files stay on the disk; Tidy up > Excluded brings them back.")
+            .clicked()
+        {
+            self.command(Command::Exclude(ids.to_vec()));
+            self.selected.clear();
+            done = true;
+        }
+        let deleted = ui
+            .add_enabled_ui(some, |ui| {
+                ui.menu_button("Delete files...", |ui| {
+                    ui.set_max_width(280.0);
+                    let what = if ids.len() == 1 {
+                        "the file".to_owned()
+                    } else {
+                        format!("{} files", ids.len())
+                    };
+                    ui.label(format!(
+                        "This will delete {what} from the disk. This CAN NOT be undone. Are you sure?"
+                    ));
+                    let mut yes = false;
+                    ui.horizontal(|ui| {
+                        let red = egui::Color32::from_rgb(235, 100, 90);
+                        if ui.button(RichText::new("Yes, delete").color(red)).clicked() {
+                            yes = true;
+                            ui.close();
+                        }
+                        if ui.button("No").clicked() {
+                            ui.close();
+                        }
+                    });
+                    yes
+                })
+                .inner
+                .unwrap_or(false)
+            })
+            .inner;
+        if deleted {
+            self.command(Command::Delete(ids.to_vec()));
+            self.selected.clear();
+            done = true;
+        }
         if done && menu {
             ui.close();
         }
@@ -1956,13 +2011,11 @@ impl Skratch {
     fn select_bar(&mut self, ui: &mut egui::Ui, ids: Vec<i64>) {
         self.visible = ids.clone();
         let typing = ui.ctx().wants_keyboard_input();
-        if !typing && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A)) {
-            self.select_mode = true;
+        if !typing
+            && self.select_mode
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A))
+        {
             self.selected.extend(ids.iter().copied());
-        }
-        if !typing && self.select_mode && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.select_mode = false;
-            self.selected.clear();
         }
         self.job_line(ui);
         ui.horizontal(|ui| {
@@ -2205,12 +2258,10 @@ impl Skratch {
         if edit_response.clicked() {
             self.action = Some(Action::Edit(id));
         }
-        // Ctrl-click toggles a track and Shift-click selects a range, with no need to switch
-        // select mode on first.
+        // In select mode a click toggles a track and Shift-click selects a range. Outside it,
+        // select mode is only ever turned on by the user, so these clicks just play.
         let modifiers = ui.input(|i| i.modifiers);
-        let modified = modifiers.command || modifiers.shift;
-        if response.clicked() && (picking || modified) {
-            self.select_mode = true;
+        if response.clicked() && picking {
             let range = modifiers
                 .shift
                 .then_some(self.anchor)
@@ -2230,7 +2281,7 @@ impl Skratch {
                 }
             }
         }
-        let activated = if picking || modified {
+        let activated = if picking {
             false
         } else if self.state.double_click {
             response.double_clicked()
@@ -2403,6 +2454,13 @@ impl Skratch {
                                 for col in 0..columns {
                                     let index = row * columns + col;
                                     let Some(group) = self.groups.get(index) else { break; };
+                                    // copied out, so the card's right-click menu may use the whole app
+                                    let (name, subtitle, count) = (group.name.clone(), group.subtitle.clone(), group.indices.len());
+                                    let photo = (self.view == View::Artists && self.state.artist_photos)
+                                        .then(|| self.photos.path(&name))
+                                        .flatten();
+                                    let art = photo.or_else(|| group.indices.first().and_then(|i| self.tracks[*i].artwork.clone()));
+                                    let ids: Vec<i64> = group.indices.iter().map(|i| self.tracks[*i].id).collect();
                                     ui.allocate_ui_with_layout(egui::vec2(170.0, 222.0), egui::Layout::top_down(egui::Align::LEFT), |ui| {
                                         const SIZE: f32 = 145.0;
                                         ui.set_min_size(egui::vec2(170.0, 222.0));
@@ -2413,7 +2471,7 @@ impl Skratch {
                                             ui.multiply_opacity(a);
                                             ui.add_space(8.0 * (1.0 - a * a * (3.0 - 2.0 * a)));
                                         }
-                                        let seed = format!("{}{}", group.name, group.subtitle);
+                                        let seed = format!("{name}{subtitle}");
                                         let origin = ui.cursor().min;
                                         let sleeve = egui::Rect::from_min_size(origin, egui::vec2(SIZE, SIZE));
                                         if depth {
@@ -2425,11 +2483,13 @@ impl Skratch {
                                             let center = egui::pos2(origin.x + SIZE * 0.5 + 22.0 * peek, origin.y + SIZE * 0.5);
                                             style::record(ui.painter(), center, SIZE * 0.47, None, style::seed_color(&seed), 0.0);
                                         }
-                                        let cover = self.art.show(ui, group.indices.first().and_then(|i| self.tracks[*i].artwork.as_deref()), SIZE, &seed).on_hover_cursor(egui::CursorIcon::PointingHand);
-                                        let title = ui.add(egui::Label::new(RichText::new(&group.name).strong().size(14.5).color(style::CREAM)).truncate().sense(egui::Sense::click())).on_hover_text(&group.name);
+                                        let cover = self.art.show(ui, art.as_deref(), SIZE, &seed).on_hover_cursor(egui::CursorIcon::PointingHand);
+                                        let title = ui.add(egui::Label::new(RichText::new(&name).strong().size(14.5).color(style::CREAM)).truncate().sense(egui::Sense::click())).on_hover_text(&name);
                                         if cover.clicked() || title.clicked() { self.selected_group = Some(index); }
-                                        ui.add(egui::Label::new(RichText::new(&group.subtitle).size(12.5).color(style::CREAM_DIM)).truncate());
-                                        ui.label(RichText::new(format!("{} track{}", group.indices.len(), if group.indices.len() == 1 { "" } else { "s" })).small().weak());
+                                        ui.add(egui::Label::new(RichText::new(&subtitle).size(12.5).color(style::CREAM_DIM)).truncate());
+                                        ui.label(RichText::new(format!("{count} track{}", if count == 1 { "" } else { "s" })).small().weak());
+                                        // right-click: what can be done with every song in it
+                                        egui::Popup::context_menu(&cover).show(|ui| self.track_actions(ui, &ids, true));
                                     });
                                 }
                             });
@@ -2883,6 +2943,14 @@ impl eframe::App for Skratch {
 
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         online::use_genius_covers(self.state.cover_genius);
+        // Escape leaves select mode, wherever the songs are listed
+        if self.select_mode
+            && !ctx.wants_keyboard_input()
+            && ctx.input(|i| i.key_pressed(egui::Key::Escape))
+        {
+            self.select_mode = false;
+            self.selected.clear();
+        }
         self.frame_at = Instant::now();
         self.poll(ctx);
         self.poll_setup();
@@ -2942,7 +3010,15 @@ impl eframe::App for Skratch {
             if let Some(text) = self.messages.last().cloned() {
                 // floats over the page, so it never pushes the layout around
                 let mut dismissed = false;
-                egui::Area::new(egui::Id::new("messages"))
+                let time = ui.input(|i| i.time);
+                let since = match &self.message_shown {
+                    Some((shown, at)) if *shown == text => *at,
+                    _ => {
+                        self.message_shown = Some((text.clone(), time));
+                        time
+                    }
+                };
+                let reply = egui::Area::new(egui::Id::new("messages"))
                     .order(egui::Order::Foreground)
                     .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 44.0))
                     .show(ui.ctx(), |ui| {
@@ -2956,9 +3032,21 @@ impl eframe::App for Skratch {
                             });
                         });
                     });
+                // it goes away by itself, longer for a longer message, and stays while the pointer is on it
+                let hold = (6.0 + text.chars().count() as f64 * 0.05).min(20.0);
+                if reply.response.hovered() {
+                    self.message_shown = Some((text, time));
+                } else if time - since > hold {
+                    self.messages.clear();
+                } else {
+                    ui.ctx()
+                        .request_repaint_after(Duration::from_secs_f64(hold - (time - since)));
+                }
                 if dismissed {
                     self.messages.pop();
                 }
+            } else {
+                self.message_shown = None;
             }
             self.player_bar(ui, radius);
             self.sidebar(ui);

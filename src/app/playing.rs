@@ -42,6 +42,8 @@ pub struct Drawer {
     /// Whether select mode was on last frame, so turning it on (from a right-click menu) brings
     /// the selection controls out once.
     select_seen: bool,
+    /// How far the tab row is slid left so an open flyout ends before the gear (last frame's).
+    shift: f32,
 }
 
 /// One of the quick options that slide out of the tabs.
@@ -62,6 +64,8 @@ enum Quick {
     Select,
     SelectAll,
     SelectNone,
+    /// A menu of what can be done with the ticked songs (opened by its own pill).
+    Actions,
 }
 
 impl Quick {
@@ -88,6 +92,9 @@ impl Quick {
             }
             Self::SelectAll => "Tick every song in the list",
             Self::SelectNone => "Untick everything",
+            Self::Actions => {
+                "What to do with the ticked songs, the same as in the right-click menu"
+            }
         }
     }
 }
@@ -386,11 +393,13 @@ impl Skratch {
         let right = ui.available_rect_before_wrap().right();
         // the row is a fixed strip, so tabs pushed past its end cannot widen the page under it
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
+        // a flyout too long for the room slides the tabs before it out of the row's left edge
         let mut header = ui.new_child(
             egui::UiBuilder::new()
-                .max_rect(row)
+                .max_rect(row.translate(vec2(-self.drawer.shift, 0.0)))
                 .layout(egui::Layout::left_to_right(Align::Center)),
         );
+        header.set_clip_rect(row.intersect(header.clip_rect()));
         // the drawer covers the tab row while it is out, so the labels leave first
         header.multiply_opacity(1.0 - self.drawer.out);
         let tabs = self.tab_row(&mut header, panel, track, right);
@@ -452,7 +461,7 @@ impl Skratch {
             self.drawer.flyout = None;
         }
         let (mut tabs, mut hit) = (Rect::NOTHING, Rect::NOTHING);
-        let (mut clicked, mut chosen) = (false, None);
+        let (mut clicked, mut chosen, mut sliding) = (false, None, false);
         for choice in NowPanel::ALL {
             let active = choice == panel;
             let mut label = choice.title().to_uppercase();
@@ -496,18 +505,35 @@ impl Skratch {
                     f32::from(self.drawer.flyout == Some(choice))
                 };
                 if open > 0.0 {
-                    let (rect, picked) = self.flyout(ui, choice, track, open);
+                    sliding = true;
+                    let (rect, picked, actions) = self.flyout(ui, choice, track, open);
                     hit = hit.union(rect);
                     chosen = chosen.or(picked);
+                    if let Some(pill) = actions {
+                        let ids = self.selected_ids();
+                        egui::Popup::menu(&pill).show(|ui| self.track_actions(ui, &ids, true));
+                    }
                 }
             }
             ui.add_space(18.0);
         }
         let pressed = ctx.input(|i| i.pointer.primary_pressed());
         let at = ctx.input(|i| i.pointer.interact_pos());
-        if pressed && !clicked && at.is_some_and(|at| !hit.expand(4.0).contains(at)) {
+        // a click inside the Actions menu is outside the tab row but must not close it
+        let menu_open = egui::Popup::is_any_open(&ctx);
+        if pressed && !clicked && !menu_open && at.is_some_and(|at| !hit.expand(4.0).contains(at)) {
             self.drawer.flyout = None;
         }
+        let room = right - 2.0 * GEAR_HALF - 8.0;
+        let shift = if sliding {
+            (hit.right() + self.drawer.shift - room).max(0.0)
+        } else {
+            0.0
+        };
+        if (shift - self.drawer.shift).abs() > 0.5 {
+            ctx.request_repaint();
+        }
+        self.drawer.shift = shift;
         if let Some(quick) = chosen {
             self.quick_apply(&ctx, quick, track);
         }
@@ -522,7 +548,7 @@ impl Skratch {
         which: NowPanel,
         track: &Track,
         open: f32,
-    ) -> (Rect, Option<Quick>) {
+    ) -> (Rect, Option<Quick>, Option<egui::Response>) {
         const LEAD: f32 = 8.0;
         const PAD: f32 = 6.0;
         const GAP: f32 = 2.0;
@@ -542,7 +568,7 @@ impl Skratch {
         let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(rect));
         inner.set_clip_rect(rect.intersect(ui.clip_rect()));
         inner.multiply_opacity(open);
-        let (mut x, mut picked) = (rect.left() + LEAD, None);
+        let (mut x, mut picked, mut actions) = (rect.left() + LEAD, None, None);
         for (n, ((quick, _, selected), galley)) in items.iter().zip(galleys).enumerate() {
             let size = vec2(galley.size().x + 2.0 * PAD, 22.0);
             let item = Rect::from_min_size(pos2(x, rect.center().y - size.y / 2.0), size);
@@ -577,8 +603,11 @@ impl Skratch {
             if response.clicked() {
                 picked = Some(*quick);
             }
+            if *quick == Quick::Actions {
+                actions = Some(response);
+            }
         }
-        (rect, picked)
+        (rect, picked, actions)
     }
 
     /// What Lyrics and Visualizer bring out in the tab row: the label of each, and whether it is
@@ -600,6 +629,7 @@ impl Skratch {
                         },
                         false,
                     ),
+                    (Quick::Actions, "Actions…".to_owned(), false),
                 ]
             } else {
                 vec![(Quick::Select, "Select".to_owned(), false)]
@@ -695,6 +725,8 @@ impl Skratch {
             }
             Quick::SelectAll => self.selected.extend(self.list_ids.iter().copied()),
             Quick::SelectNone => self.selected.clear(),
+            // its menu is opened by the pill itself
+            Quick::Actions => {}
         }
     }
 
@@ -1449,7 +1481,12 @@ impl Skratch {
                         .size(11.0)
                         .color(style::CREAM_DIM);
                     // a service's name is a link to its page for this song
-                    match origin.page(&track.artist, &track.title) {
+                    match self
+                        .lyrics
+                        .link
+                        .clone()
+                        .or_else(|| origin.page(&track.artist, &track.title))
+                    {
                         Some(url) => {
                             let link = ui
                                 .add(egui::Label::new(text).sense(egui::Sense::click()))

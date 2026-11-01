@@ -50,7 +50,7 @@ pub struct Tidy {
 
 enum CopyRow {
     Header(String),
-    Track(usize),
+    Track(usize, Vec<i64>),
 }
 
 /// A lyrics lookup or save running over many songs in the background.
@@ -572,7 +572,15 @@ impl Skratch {
                 first.title,
                 group.len()
             )));
-            copies.extend(group.iter().map(|i| CopyRow::Track(*i)));
+            copies.extend(group.iter().map(|i| {
+                // the other copies of this song, for "keep only this one"
+                let others = group
+                    .iter()
+                    .filter(|j| *j != i)
+                    .map(|j| self.tracks[*j].id)
+                    .collect();
+                CopyRow::Track(*i, others)
+            }));
         }
         Tidy {
             copies,
@@ -648,7 +656,7 @@ impl Skratch {
                             CopyRow::Header(text) => {
                                 ui.label(RichText::new(text).strong().color(style::CREAM));
                             }
-                            CopyRow::Track(i) => self.tidy_track(ui, *i, None),
+                            CopyRow::Track(i, others) => self.tidy_track(ui, *i, None, others),
                         },
                     );
                 }
@@ -713,7 +721,7 @@ impl Skratch {
                     ui.allocate_ui_with_layout(
                         vec2(ui.available_width(), height - 4.0),
                         egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| self.tidy_track(ui, *i, Some(note)),
+                        |ui| self.tidy_track(ui, *i, Some(note), &[]),
                     );
                 }
             });
@@ -760,7 +768,15 @@ impl Skratch {
     }
 
     /// One track on the Tidy page: what it is, a note, and buttons to play or edit it.
-    fn tidy_track(&mut self, ui: &mut egui::Ui, index: usize, note: Option<String>) {
+    /// `others` are the other copies of the same song (duplicates page), which "keep only this
+    /// one" takes out.
+    fn tidy_track(
+        &mut self,
+        ui: &mut egui::Ui,
+        index: usize,
+        note: Option<String>,
+        others: &[i64],
+    ) {
         let track = &self.tracks[index];
         let (id, title, album, length) = (
             track.id,
@@ -781,6 +797,23 @@ impl Skratch {
         }
         if ui.small_button("Edit").clicked() {
             self.action = Some(Action::Edit(id));
+        }
+        if !others.is_empty() {
+            if ui
+                .small_button("Keep only this")
+                .on_hover_text("Exclude the other copies of this song. Their files stay on the disk; Excluded brings them back.")
+                .clicked()
+            {
+                self.command(Command::Exclude(others.to_vec()));
+            }
+            if confirm_button(
+                ui,
+                "Delete others",
+                "This will delete the other copies from the disk and keep this one. This CAN NOT be undone. Are you sure?",
+                "Yes, delete them",
+            ) {
+                self.command(Command::Delete(others.to_vec()));
+            }
         }
         if ui
             .small_button("Exclude")

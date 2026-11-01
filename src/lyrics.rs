@@ -347,7 +347,8 @@ fn without_credits(lrc: &str) -> String {
 
 /// NetEase Cloud Music's public search and lyric endpoints. Unofficial and liable to change,
 /// so callers treat a failure here as "this source did not answer", never as fatal.
-fn netease(track: &Track, skip: &[String]) -> Result<Option<Lyrics>> {
+/// `link` is set to the song's page when lyrics are found.
+fn netease(track: &Track, skip: &[String], link: &mut Option<String>) -> Result<Option<Lyrics>> {
     let q = format!(
         "{} {}",
         track.artist.trim(),
@@ -371,17 +372,23 @@ fn netease(track: &Track, skip: &[String]) -> Result<Option<Lyrics>> {
             .and_then(|lrc| Lyrics::from_text(&without_credits(lrc)))
             .filter(|l| netease_fits(l, track.duration) && !is_rejected(skip, l))
         {
+            *link = Some(format!("https://music.163.com/#/song?id={id}"));
             return Ok(Some(lyrics));
         }
     }
     Ok(None)
 }
 
-/// Genius's plain lyrics for the track.
-fn genius(track: &Track, skip: &[String]) -> Result<Option<Lyrics>> {
-    Ok(crate::genius::lyrics(track.artist.trim(), &track.title)?
-        .and_then(|text| Lyrics::from_text(&text))
-        .filter(|l| !is_rejected(skip, l)))
+/// Genius's plain lyrics for the track; `link` is set to the page they came from.
+fn genius(track: &Track, skip: &[String], link: &mut Option<String>) -> Result<Option<Lyrics>> {
+    let Some((text, page)) = crate::genius::lyrics(track.artist.trim(), &track.title)? else {
+        return Ok(None);
+    };
+    let found = Lyrics::from_text(&text).filter(|l| !is_rejected(skip, l));
+    if found.is_some() {
+        *link = Some(page);
+    }
+    Ok(found)
 }
 
 fn embedded(path: &Path) -> Option<Lyrics> {
@@ -477,7 +484,13 @@ pub fn forget_rejected(dir: &Path, track: &Track) {
 }
 
 /// Keeps an online answer (or the lack of one) so the next play needs no network.
-fn remember(dir: &Path, track: &Track, lyrics: Option<&Lyrics>, origin: Origin) {
+fn remember(
+    dir: &Path,
+    track: &Track,
+    lyrics: Option<&Lyrics>,
+    origin: Origin,
+    link: Option<&str>,
+) {
     let (synced, plain) = match lyrics {
         Some(l @ Lyrics::Synced(_)) => (Some(l.to_text()), None),
         Some(Lyrics::Plain(text)) => (None, Some(text.clone())),
@@ -487,7 +500,8 @@ fn remember(dir: &Path, track: &Track, lyrics: Option<&Lyrics>, origin: Origin) 
     let _ = fs::create_dir_all(dir).and_then(|()| {
         fs::write(
             cache_file(dir, track),
-            json!({"synced": synced, "plain": plain, "source": origin.key(), "v": 2}).to_string(),
+            json!({"synced": synced, "plain": plain, "source": origin.key(), "link": link, "v": 2})
+                .to_string(),
         )
     });
 }
@@ -586,6 +600,8 @@ impl Origin {
 pub struct Answer {
     pub lyrics: Option<Lyrics>,
     pub origin: Option<Origin>,
+    /// The service's page for these very lyrics, when it has one.
+    pub link: Option<String>,
     pub notes: Notes,
 }
 
@@ -603,6 +619,7 @@ fn find(track: &Track, dir: &Path, online: Online) -> Answer {
     let local = |lyrics: Option<Lyrics>, origin| Answer {
         origin: lyrics.as_ref().map(|_| origin),
         lyrics,
+        link: None,
         notes: Notes::new(),
     };
     if let Ok(text) = fs::read_to_string(user_file(dir, track)) {
@@ -625,7 +642,9 @@ fn find(track: &Track, dir: &Path, online: Online) -> Answer {
     {
         let text = |key: &str| saved[key].as_str().and_then(Lyrics::from_text);
         if let Some(lyrics) = text("synced").or_else(|| text("plain")) {
-            return local(Some(lyrics), Origin::from_key(saved["source"].as_str()));
+            let mut answer = local(Some(lyrics), Origin::from_key(saved["source"].as_str()));
+            answer.link = saved["link"].as_str().map(str::to_owned);
+            return answer;
         }
         let fresh = fs::metadata(&cache)
             .and_then(|m| m.modified())
@@ -636,6 +655,7 @@ fn find(track: &Track, dir: &Path, online: Online) -> Answer {
             return Answer {
                 lyrics: None,
                 origin: None,
+                link: None,
                 notes: vec![(
                     "Earlier lookup",
                     "nothing was found; Skratch asks again after a week".into(),
@@ -648,6 +668,7 @@ fn find(track: &Track, dir: &Path, online: Online) -> Answer {
     }
     let mut notes = Notes::new();
     let skip = rejected(dir, track);
+    let mut link = None;
     let primary = OUTAGES.ask(Origin::Lrclib, || lrclib(track, &skip));
     note("LRCLIB", &primary, &mut notes);
     // "nothing" is only remembered when every source we asked actually answered
@@ -655,24 +676,25 @@ fn find(track: &Track, dir: &Path, online: Online) -> Answer {
     let mut lyrics = primary.ok().flatten();
     let mut origin = Origin::Lrclib;
     if lyrics.is_none() && online.fallback {
-        let second = OUTAGES.ask(Origin::NetEase, || netease(track, &skip));
+        let second = OUTAGES.ask(Origin::NetEase, || netease(track, &skip, &mut link));
         note("NetEase", &second, &mut notes);
         complete &= second.is_ok();
         lyrics = second.ok().flatten();
         origin = Origin::NetEase;
     }
     if lyrics.is_none() && online.genius {
-        let third = OUTAGES.ask(Origin::Genius, || genius(track, &skip));
+        let third = OUTAGES.ask(Origin::Genius, || genius(track, &skip, &mut link));
         note("Genius", &third, &mut notes);
         complete &= third.is_ok();
         lyrics = third.ok().flatten();
         origin = Origin::Genius;
     }
     if lyrics.is_some() || complete {
-        remember(dir, track, lyrics.as_ref(), origin);
+        remember(dir, track, lyrics.as_ref(), origin, link.as_deref());
     }
     Answer {
         origin: lyrics.as_ref().map(|_| origin),
+        link: link.filter(|_| lyrics.is_some()),
         lyrics,
         notes,
     }
@@ -785,10 +807,11 @@ fn other_source(
     current: Option<&Lyrics>,
     online: Online,
     skip: &[String],
-) -> Result<Option<(Lyrics, Origin)>> {
+) -> Result<Option<(Lyrics, Origin, Option<String>)>> {
     let mut found = Vec::new();
     let mut errors = Vec::new();
     let mut answered = 0;
+    let (mut netease_link, mut genius_link) = (None, None);
     let mut sources: Vec<(Origin, Result<Option<Lyrics>>)> = vec![(
         Origin::Lrclib,
         OUTAGES.ask(Origin::Lrclib, || lrclib(track, skip)),
@@ -796,27 +819,36 @@ fn other_source(
     if online.fallback {
         sources.push((
             Origin::NetEase,
-            OUTAGES.ask(Origin::NetEase, || netease(track, skip)),
+            OUTAGES.ask(Origin::NetEase, || netease(track, skip, &mut netease_link)),
         ));
     }
     if online.genius {
         sources.push((
             Origin::Genius,
-            OUTAGES.ask(Origin::Genius, || genius(track, skip)),
+            OUTAGES.ask(Origin::Genius, || genius(track, skip, &mut genius_link)),
         ));
     }
     for (origin, answer) in sources {
         match answer {
             Ok(lyrics) => {
                 answered += 1;
-                found.extend(lyrics.filter(|l| current != Some(l)).map(|l| (l, origin)));
+                let link = match origin {
+                    Origin::NetEase => netease_link.clone(),
+                    Origin::Genius => genius_link.clone(),
+                    _ => None,
+                };
+                found.extend(
+                    lyrics
+                        .filter(|l| current != Some(l))
+                        .map(|l| (l, origin, link)),
+                );
             }
             Err(error) => errors.push(error),
         }
     }
     let best = found
         .iter()
-        .position(|(l, _)| matches!(l, Lyrics::Synced(_)))
+        .position(|(l, ..)| matches!(l, Lyrics::Synced(_)))
         .unwrap_or(0);
     if !found.is_empty() {
         return Ok(Some(found.swap_remove(best)));
@@ -845,6 +877,8 @@ pub struct Lookup {
     pub status: Status,
     /// Where the lyrics in `status` came from, once they are found.
     pub origin: Option<Origin>,
+    /// The service's page for these very lyrics, when it has one.
+    pub link: Option<String>,
     /// What each source said when `status` is `Missing`.
     pub notes: Notes,
     /// The synced line the panel last scrolled to.
@@ -860,7 +894,7 @@ pub struct Lookup {
     pub other_state: OtherState,
 }
 
-type Other = (PathBuf, Result<Option<(Lyrics, Origin)>>);
+type Other = (PathBuf, Result<Option<(Lyrics, Origin, Option<String>)>>);
 
 /// Where "Try another source" stands, for the menu to show.
 #[derive(Clone, PartialEq)]
@@ -882,6 +916,7 @@ impl Default for Lookup {
             asked_online: false,
             status: Status::Loading,
             origin: None,
+            link: None,
             notes: Notes::new(),
             scrolled: None,
             editing: None,
@@ -908,6 +943,7 @@ impl Lookup {
             self.other_state = OtherState::Idle;
             self.status = Status::Loading;
             self.origin = None;
+            self.link = None;
             self.notes.clear();
             self.scrolled = None;
             self.editing = None;
@@ -919,11 +955,12 @@ impl Lookup {
                 continue;
             }
             self.other_state = match result {
-                Ok(Some((lyrics, origin))) => {
+                Ok(Some((lyrics, origin, link))) => {
                     self.marks = None;
                     self.scrolled = None;
                     self.status = Status::Found(lyrics);
                     self.origin = Some(origin);
+                    self.link = link;
                     OtherState::Idle
                 }
                 Ok(None) => OtherState::NothingElse("No other source had different lyrics.".into()),
@@ -937,6 +974,7 @@ impl Lookup {
                 self.marks = None;
                 self.status = answer.lyrics.map_or(Status::Missing, Status::Found);
                 self.origin = answer.origin;
+                self.link = answer.link;
                 self.notes = answer.notes;
             }
         }
@@ -959,12 +997,12 @@ impl Lookup {
         std::thread::spawn(move || {
             let skip = rejected(&dir, &track);
             let result = other_source(&track, current.as_ref(), online, &skip);
-            if let Ok(Some((lyrics, origin))) = &result {
+            if let Ok(Some((lyrics, origin, link))) = &result {
                 // the user's own file would hide the new lyrics on the next play
                 if user_file(&dir, &track).exists() {
                     let _ = save(&dir, &track, &lyrics.to_text());
                 } else {
-                    remember(&dir, &track, Some(lyrics), *origin);
+                    remember(&dir, &track, Some(lyrics), *origin, link.as_deref());
                 }
             }
             let _ = tx.send((track.path, result));
@@ -1245,8 +1283,14 @@ mod tests {
             &track,
             Some(&Lyrics::Plain("words".into())),
             Origin::NetEase,
+            Some("https://music.163.com/#/song?id=1"),
         );
         assert_eq!(origin(&track), Some(Origin::NetEase));
+        // ...and the page of the very song they came from
+        assert_eq!(
+            find(&track, &cache, Online::default()).link.as_deref(),
+            Some("https://music.163.com/#/song?id=1")
+        );
         // a NetEase answer saved before NetEase was checked closely is not believed
         fs::write(
             cache_file(&cache, &track),
@@ -1276,6 +1320,7 @@ mod tests {
             &track,
             Some(&Lyrics::Plain("words".into())),
             Origin::Genius,
+            None,
         );
         assert_eq!(Origin::from_key(Some("genius")), Origin::Genius);
         assert_eq!(Origin::Genius.label(), "Genius");

@@ -89,7 +89,7 @@ pub fn search(artist: &str, album: &str) -> Result<Vec<Candidate>> {
         ("Deezer", deezer(artist, album)),
         ("MusicBrainz", musicbrainz(artist, album)),
     ];
-    if GENIUS_COVERS.load(Ordering::Relaxed) {
+    if genius_covers() {
         sources.push(("Genius", genius(artist, album)));
     }
     if sources.iter().all(|(_, found)| found.is_err()) {
@@ -99,10 +99,94 @@ pub fn search(artist: &str, album: &str) -> Result<Vec<Candidate>> {
             .collect();
         anyhow::bail!("{}", errors.join("; "));
     }
-    Ok(sources
+    let mut found: Vec<Candidate> = sources
         .into_iter()
         .flat_map(|(_, found)| found.unwrap_or_default())
+        .collect();
+    // community-filled and patchy, so only asked when nothing else had the album
+    if found.is_empty() && !artist.is_empty() && !album.is_empty() {
+        found = audiodb(artist, album).unwrap_or_default();
+    }
+    Ok(found)
+}
+
+fn audiodb(artist: &str, album: &str) -> Result<Vec<Candidate>> {
+    // 123 is the free key TheAudioDB publishes for small projects
+    let json = get_json(
+        "https://www.theaudiodb.com/api/v1/json/123/searchalbum.php",
+        &[("s", artist), ("a", album)],
+    )?;
+    Ok(parse_audiodb(&json))
+}
+
+fn parse_audiodb(json: &Value) -> Vec<Candidate> {
+    json["album"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|album| {
+            let image = album["strAlbumThumb"]
+                .as_str()
+                .filter(|u| u.starts_with("https://"))?;
+            let year = album["intYearReleased"]
+                .as_str()
+                .filter(|y| y.len() == 4)
+                .map(|y| format!(" ({y})"))
+                .unwrap_or_default();
+            Some(Candidate {
+                label: format!(
+                    "{} - {}{year}",
+                    album["strArtist"].as_str()?,
+                    album["strAlbum"].as_str()?
+                ),
+                source: "TheAudioDB".to_owned(),
+                // the image host serves a small copy under this name
+                thumb: format!("{image}/preview"),
+                full: image.to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// Genius's art for the song `title` by `artist`, for a track whose album gives nothing to search
+/// by. Empty unless Genius covers are switched on.
+pub fn song_art(artist: &str, title: &str) -> Result<Vec<Candidate>> {
+    if !genius_covers() || artist.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(genius(artist.trim(), title.trim())?
+        .into_iter()
+        .filter(|c| c.label.ends_with("(song art)"))
         .collect())
+}
+
+/// Deezer's picture of the artist called exactly `name` (500 px), if it has one.
+pub fn artist_photo(name: &str) -> Result<Option<Vec<u8>>> {
+    let plain = |text: &str| -> String {
+        text.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let json = get_json(
+        "https://api.deezer.com/search/artist",
+        &[("q", name), ("limit", "5")],
+    )?;
+    let want = plain(name);
+    let url = json["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|artist| artist["name"].as_str().is_some_and(|n| plain(n) == want))
+        // an artist with no picture points at an address with an empty name
+        .and_then(|artist| artist["picture_big"].as_str())
+        .filter(|url| !url.contains("/artist//"));
+    url.map(fetch_image).transpose()
+}
+
+/// Whether Genius is asked for covers (the setting).
+pub fn genius_covers() -> bool {
+    GENIUS_COVERS.load(Ordering::Relaxed)
 }
 
 fn deezer(artist: &str, album: &str) -> Result<Vec<Candidate>> {
@@ -135,7 +219,7 @@ fn parse_deezer(json: &Value) -> Vec<Candidate> {
 }
 
 fn genius(artist: &str, album: &str) -> Result<Vec<Candidate>> {
-    Ok(crate::genius::albums(artist, album)?
+    Ok(crate::genius::covers(artist, album)?
         .into_iter()
         .map(|(label, cover)| Candidate {
             label,
@@ -436,6 +520,20 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].label, "A - B (2020)");
         assert_eq!(found[0].full, "https://is1.mzstatic.com/a/600x600bb.jpg");
+    }
+
+    #[test]
+    fn audiodb_albums_become_candidates_with_a_small_preview() {
+        let json = json!({"album": [
+            {"strAlbum": "B", "strArtist": "A", "intYearReleased": "2001", "strAlbumThumb": "https://x/img.jpg"},
+            {"strAlbum": "no image", "strArtist": "A", "strAlbumThumb": null},
+        ]});
+        let found = parse_audiodb(&json);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].label, "A - B (2001)");
+        assert_eq!(found[0].thumb, "https://x/img.jpg/preview");
+        // the service answers {"album": null} for an unknown album
+        assert!(parse_audiodb(&json!({"album": null})).is_empty());
     }
 
     #[test]

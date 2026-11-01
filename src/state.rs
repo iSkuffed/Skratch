@@ -332,6 +332,9 @@ pub struct SavedState {
     /// Also asks Genius for album covers in cover searches. Off, like Genius lyrics, because
     /// Genius's terms do not allow automated use.
     pub cover_genius: bool,
+    /// Shows photos of artists, fetched from Deezer, on the Artists page. Off: the names of the
+    /// artists are sent to Deezer.
+    pub artist_photos: bool,
     /// Writes lyrics into a song's own file once it has been played through, from what Skratch
     /// already holds for it. Off, because it changes the user's files.
     pub lyrics_embed: bool,

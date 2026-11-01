@@ -343,12 +343,21 @@ pub fn find(track: &Track) -> Result<Vec<Choice>> {
         });
     }
     // no tags to add, but a cover is missing: offer one for the album the song already has
-    if choices.is_empty() && want_cover && trusted_album(track) {
+    // (a song with no real album, like an unreleased track, may still have art of its own on
+    // Genius, when that is switched on)
+    let album_known = trusted_album(track);
+    if choices.is_empty() && want_cover && (album_known || online::genius_covers()) {
         std::thread::sleep(PAUSE);
-        if let Some(cover) = patient(|| online::search(&track.artist, &track.album))
-            .ok()
-            .and_then(|list| cover_for(list, &track.album))
-        {
+        let cover = if album_known {
+            patient(|| online::search(&track.artist, &track.album))
+                .ok()
+                .and_then(|list| cover_for(list, &track.album))
+        } else {
+            patient(|| online::song_art(&track.artist, &track.title))
+                .ok()
+                .and_then(|list| list.into_iter().next())
+        };
+        if let Some(cover) = cover {
             let thumb = thumbnail(&cover);
             choices.push(Choice {
                 changes: Vec::new(),

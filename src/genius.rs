@@ -6,8 +6,9 @@ use crate::{online, tagparse};
 use anyhow::Result;
 use serde_json::Value;
 
-/// The lyrics of `artist` - `title` as plain text, if Genius has a page for that song.
-pub fn lyrics(artist: &str, title: &str) -> Result<Option<String>> {
+/// The lyrics of `artist` - `title` as plain text, with the address of the page they were read
+/// from, if Genius has a page for that song.
+pub fn lyrics(artist: &str, title: &str) -> Result<Option<(String, String)>> {
     let title = tagparse::strip_noise(title);
     let found = online::get_json(
         "https://genius.com/api/search/multi",
@@ -17,20 +18,55 @@ pub fn lyrics(artist: &str, title: &str) -> Result<Option<String>> {
         let page = online::get_text(&url)?;
         let text = extract(&page);
         if !text.is_empty() {
-            return Ok(Some(text));
+            return Ok(Some((text, url)));
         }
     }
     Ok(None)
 }
 
-/// Albums Genius lists for `artist` + `album`, as ("Artist - Album", cover url) with the 1000 px
-/// cover. Albums by another artist than the one asked about are left out.
-pub fn albums(artist: &str, album: &str) -> Result<Vec<(String, String)>> {
+/// Covers Genius has for `artist` + `query`, as (label, 1000 px image): the albums it lists, and
+/// the art of a song called exactly `query` (a single or an unreleased track has no album
+/// cover). Anything by another artist than the one asked about is left out.
+pub fn covers(artist: &str, query: &str) -> Result<Vec<(String, String)>> {
     let found = online::get_json(
         "https://genius.com/api/search/multi",
-        &[("q", &format!("{artist} {album}"))],
+        &[("q", &format!("{artist} {query}"))],
     )?;
-    Ok(album_covers(&found, artist))
+    let mut covers = album_covers(&found, artist);
+    covers.extend(song_covers(&found, artist, query));
+    Ok(covers)
+}
+
+/// The art Genius shows when a song or album has none of its own.
+fn is_placeholder(url: &str) -> bool {
+    url.contains("default_cover_image") || url.contains("default_avatar")
+}
+
+/// The art of songs that are exactly `title` by `artist` (when the track has one).
+fn song_covers(results: &Value, artist: &str, title: &str) -> Vec<(String, String)> {
+    let (want, title) = (plain(artist), plain(title));
+    if title.is_empty() {
+        return Vec::new();
+    }
+    results["response"]["sections"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|s| s["hits"].as_array().into_iter().flatten())
+        .filter(|hit| hit["type"] == "song")
+        .filter_map(|hit| {
+            let song = &hit["result"];
+            let (name, by, art) = (
+                song["title"].as_str()?,
+                song["primary_artist"]["name"].as_str()?,
+                song["song_art_image_url"].as_str()?,
+            );
+            let by_plain = plain(by);
+            let fits = want.is_empty() || by_plain.contains(&want) || want.contains(&by_plain);
+            (fits && plain(name) == title && art.starts_with("https://") && !is_placeholder(art))
+                .then(|| (format!("{by} - {name} (song art)"), art.to_owned()))
+        })
+        .collect()
 }
 
 fn album_covers(results: &Value, artist: &str) -> Vec<(String, String)> {
@@ -50,7 +86,7 @@ fn album_covers(results: &Value, artist: &str) -> Vec<(String, String)> {
             );
             let by_plain = plain(by);
             let fits = want.is_empty() || by_plain.contains(&want) || want.contains(&by_plain);
-            (fits && cover.starts_with("https://"))
+            (fits && cover.starts_with("https://") && !is_placeholder(cover))
                 .then(|| (format!("{by} - {name}"), cover.to_owned()))
         })
         .collect()
@@ -244,6 +280,25 @@ mod tests {
     }
 
     #[test]
+    fn a_song_gives_its_art_only_when_title_and_artist_match() {
+        let song = |title: &str, by: &str, art: &str| json!({"type": "song", "result": {"title": title, "primary_artist": {"name": by}, "song_art_image_url": art}});
+        let results = json!({"response": {"sections": [{"type": "song", "hits": [
+            song("Demo Tape", "The Band", "https://images.example/a.1000x1000x1.jpg"),
+            song("Demo Tape (Remix)", "The Band", "https://images.example/b.jpg"),
+            song("Demo Tape", "Somebody Else", "https://images.example/c.jpg"),
+            song("Demo Tape", "The Band", "https://assets.example/images/default_cover_image.png"),
+        ]}]}});
+        assert_eq!(
+            song_covers(&results, "The Band", "demo tape"),
+            [(
+                "The Band - Demo Tape (song art)".to_string(),
+                "https://images.example/a.1000x1000x1.jpg".to_string()
+            )]
+        );
+        assert!(song_covers(&results, "The Band", "").is_empty());
+    }
+
+    #[test]
     fn lyrics_are_read_out_of_the_page_without_its_furniture() {
         let page = concat!(
             "<html><div data-lyrics-container=\"true\" class=\"Lyrics\">",
@@ -293,7 +348,7 @@ mod tests {
         ] {
             let found = lyrics(artist, title).unwrap();
             match found {
-                Some(text) => {
+                Some((text, _page)) => {
                     println!(
                         "{artist} - {title}: {} lines, {} bytes, starts {:?}, ends {:?}",
                         text.lines().count(),
