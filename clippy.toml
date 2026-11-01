@@ -1,0 +1,5 @@
+disallowed-methods = [
+    { path = "egui::containers::scroll_area::ScrollArea::vertical", reason = "use style::scroll(): it keeps the scrollbar anchored to the panel edge" },
+    { path = "egui::containers::scroll_area::ScrollArea::horizontal", reason = "add a style helper that keeps the bar anchored first" },
+    { path = "egui::containers::scroll_area::ScrollArea::both", reason = "add a style helper that keeps the bars anchored first" },
+]

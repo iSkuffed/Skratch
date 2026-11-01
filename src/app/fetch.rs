@@ -193,7 +193,7 @@ impl Skratch {
                 }
                 ui.checkbox(&mut fetch.replace, "Replace existing values too (otherwise only empty fields are filled)");
                 ui.separator();
-                egui::ScrollArea::vertical().max_height(380.0).show_rows(ui, 22.0, fetch.rows.len(), |ui, range| {
+                crate::style::scroll().max_height(380.0).show_rows(ui, 22.0, fetch.rows.len(), |ui, range| {
                     for row in &mut fetch.rows[range] {
                         let Some(track) = by_id.get(&row.id).map(|i| &tracks[*i]) else {
                             continue;

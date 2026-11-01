@@ -1007,7 +1007,7 @@ impl Skratch {
             .frame(frame)
             .show_inside(ui, |ui| {
                 // a short window or screen would otherwise cut the lower entries off
-                egui::ScrollArea::vertical()
+                style::scroll()
                     .id_salt("sidebar-scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| self.sidebar_entries(ui));
@@ -1072,7 +1072,7 @@ impl Skratch {
         }
         section(ui, "MUSIC FOLDERS", true);
         let mut remove = None;
-        egui::ScrollArea::vertical()
+        style::scroll()
             .id_salt("sources")
             .max_height(180.0)
             .show(ui, |ui| {
@@ -1769,7 +1769,7 @@ impl Skratch {
             .iter()
             .filter_map(|id| self.by_id.get(id).copied())
             .collect();
-        egui::ScrollArea::vertical()
+        style::scroll()
             .id_salt(("playlist", p))
             .show_rows(ui, 40.0, rows.len(), |ui, range| {
                 for r in range {
@@ -1985,7 +1985,7 @@ impl Skratch {
                 });
                 ui.label(RichText::new("Placeholders: {artist} {title} {album} {track}. A featured artist (ft. / feat. / featuring) is found automatically and added to the title as (feat. X).").small().weak());
                 ui.separator();
-                egui::ScrollArea::vertical().max_height(320.0).show_rows(ui, 20.0, rows.len(), |ui, range| {
+                style::scroll().max_height(320.0).show_rows(ui, 20.0, rows.len(), |ui, range| {
                     for (_, stem, result) in &rows[range] {
                         ui.horizontal(|ui| {
                             ui.allocate_ui_with_layout(egui::vec2(280.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| { ui.set_min_size(egui::vec2(280.0, 18.0)); ui.add(egui::Label::new(RichText::new(stem).weak()).truncate()); });
@@ -2319,7 +2319,7 @@ impl Skratch {
                 });
                 self.select_bar(ui, self.state.queue.ids.clone());
                 let indices: Vec<(usize, usize)> = self.state.queue.ids.iter().enumerate().filter_map(|(q, id)| self.by_id.get(id).map(|i| (q, *i))).collect();
-                egui::ScrollArea::vertical().id_salt("queue").show_rows(ui, 40.0, indices.len(), |ui, range| {
+                style::scroll().id_salt("queue").show_rows(ui, 40.0, indices.len(), |ui, range| {
                     for r in range { let (q, i) = indices[r]; self.track_row(ui, i, Some(q), 0); }
                 });
                 return;
@@ -2336,7 +2336,7 @@ impl Skratch {
                         if ui.button("Find cover online...").clicked() { self.action = Some(Action::FindCover(ids.clone())); }
                     });
                     self.select_bar(ui, ids);
-                    egui::ScrollArea::vertical().id_salt("group-tracks").show_rows(ui, 40.0, count, |ui, range| {
+                    style::scroll().id_salt("group-tracks").show_rows(ui, 40.0, count, |ui, range| {
                         for r in range { let i = self.groups[group_index].indices[r]; self.track_row(ui, i, None, r); }
                     });
                 } else {
@@ -2350,7 +2350,7 @@ impl Skratch {
                     let stagger = self.state.effects.transitions();
                     let depth = self.state.look.depth;
                     let rows = self.groups.len().div_ceil(columns);
-                    egui::ScrollArea::vertical().id_salt("group-grid").show_rows(ui, 230.0, rows, |ui, range| {
+                    style::scroll().id_salt("group-grid").show_rows(ui, 230.0, rows, |ui, range| {
                         for row in range {
                             ui.horizontal(|ui| {
                                 for col in 0..columns {
@@ -2395,7 +2395,7 @@ impl Skratch {
                 });
                 let ids = self.filtered.iter().map(|i| self.tracks[*i].id).collect();
                 self.select_bar(ui, ids);
-                egui::ScrollArea::vertical().id_salt("all-tracks").show_rows(ui, 40.0, self.filtered.len(), |ui, range| {
+                style::scroll().id_salt("all-tracks").show_rows(ui, 40.0, self.filtered.len(), |ui, range| {
                     for r in range { let i = self.filtered[r]; self.track_row(ui, i, None, r); }
                 });
             }
@@ -2513,7 +2513,7 @@ impl Skratch {
         );
         ui.add_space(8.0);
         egui::CollapsingHeader::new("Download details").show(ui, |ui| {
-            egui::ScrollArea::vertical()
+            style::scroll()
                 .id_salt("download-log")
                 .max_height(260.0)
                 .stick_to_bottom(true)
@@ -2673,7 +2673,7 @@ impl Skratch {
                 if !cover.status.is_empty() {
                     ui.label(RichText::new(&cover.status).color(if cover.working { style::CREAM_DIM } else { accent }));
                 }
-                egui::ScrollArea::vertical().max_height(410.0).show(ui, |ui| {
+                style::scroll().max_height(410.0).show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
                         for (i, found) in cover.found.iter().enumerate().filter(|(_, f)| !f.failed) {

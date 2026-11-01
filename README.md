@@ -59,6 +59,13 @@ dbus-run-session -- cargo test --test playback -- --test-threads=1
 
 Tests use mpv's null audio output and generated temporary media, never your music folders.
 
+### Layout rules
+
+Controls that belong to a panel stay in the same place whatever the content is; they only move when the window is resized.
+
+- **Scroll areas:** always `style::scroll()`, never `egui::ScrollArea::vertical()`. egui's default shrinks the area to its widest row, so the scrollbar drifts to follow the longest title. `style::scroll()` fixes the width to the panel. `clippy.toml` bans the plain constructors, so `cargo clippy` fails if one comes back.
+- Any other widget that sizes itself to its content (a side bar, a pull tab, a button column) needs a fixed position or width in the same way. Check it with a short row and a very long row.
+
 | File | What it does |
 | --- | --- |
 | `src/app.rs` | The egui interface |

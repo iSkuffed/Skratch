@@ -621,9 +621,11 @@ impl Skratch {
             return;
         }
         let height = 28.0;
-        egui::ScrollArea::vertical()
-            .id_salt("tidy-copies")
-            .show_rows(ui, height, tidy.copies.len(), |ui, range| {
+        style::scroll().id_salt("tidy-copies").show_rows(
+            ui,
+            height,
+            tidy.copies.len(),
+            |ui, range| {
                 for row in &tidy.copies[range] {
                     ui.allocate_ui_with_layout(
                         vec2(ui.available_width(), height - 4.0),
@@ -636,7 +638,8 @@ impl Skratch {
                         },
                     );
                 }
-            });
+            },
+        );
     }
 
     fn loose_page(&mut self, ui: &mut egui::Ui, tidy: &Tidy) {
@@ -684,7 +687,7 @@ impl Skratch {
         });
         ui.separator();
         let height = 28.0;
-        egui::ScrollArea::vertical()
+        style::scroll()
             .id_salt("tidy-loose")
             .show_rows(ui, height, rows.len(), |ui, range| {
                 for (i, found) in rows[range].iter().copied() {

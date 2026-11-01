@@ -775,7 +775,7 @@ impl Skratch {
                 ui.scope_builder(
                     egui::UiBuilder::new().max_rect(layout.content.translate(shift)),
                     |ui| {
-                        egui::ScrollArea::vertical()
+                        style::scroll()
                             .auto_shrink(false)
                             .show(ui, |ui| self.drawer_contents(ui, track))
                             .inner
@@ -1051,16 +1051,14 @@ impl Skratch {
             }
         });
         let room = (ui.available_height() - 96.0).max(80.0);
-        egui::ScrollArea::vertical()
-            .max_height(room)
-            .show(ui, |ui| {
-                ui.add(
-                    egui::TextEdit::multiline(&mut text)
-                        .id(id)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(14),
-                );
-            });
+        style::scroll().max_height(room).show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(&mut text)
+                    .id(id)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(14),
+            );
+        });
         let (mut save, mut cancel, mut stamp) = (false, false, stamp_key);
         ui.horizontal(|ui| {
             save = ui.button("Save").clicked();
@@ -1169,7 +1167,7 @@ impl Skratch {
             }
             Status::Found(Lyrics::Plain(text)) => {
                 let marks = self.lyrics.marks.as_deref().unwrap_or(&[]);
-                egui::ScrollArea::vertical()
+                style::scroll()
                     .id_salt("lyrics")
                     .max_height(scroll_height)
                     .auto_shrink(false)
@@ -1202,7 +1200,7 @@ impl Skratch {
             Status::Found(Lyrics::Synced(lines)) => {
                 let current = lines.partition_point(|(t, _)| *t <= now).checked_sub(1);
                 let marks = self.lyrics.marks.as_deref().unwrap_or(&[]);
-                egui::ScrollArea::vertical()
+                style::scroll()
                     .id_salt("lyrics")
                     .max_height(scroll_height)
                     .auto_shrink(false)
@@ -1358,7 +1356,7 @@ impl Skratch {
         let now = ui.input(|i| i.time);
         let bounds = ui.available_rect_before_wrap();
         let browsing = ui.rect_contains_pointer(bounds);
-        let mut area = egui::ScrollArea::vertical()
+        let mut area = style::scroll()
             .id_salt(("now-list", panel as u8))
             .auto_shrink(false);
         if self.listed != current {

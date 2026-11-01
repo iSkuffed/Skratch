@@ -1047,6 +1047,14 @@ pub fn search_field(
     (response, chip_clicked)
 }
 
+/// The one way to make a vertical scroll area. Its width is fixed to the space it is given, so
+/// the scrollbar stays against the panel's edge instead of following the longest row. Plain
+/// `egui::ScrollArea::vertical()` is banned by clippy.toml; see the "Layout rules" in README.
+#[allow(clippy::disallowed_methods)]
+pub fn scroll() -> egui::ScrollArea {
+    egui::ScrollArea::vertical().auto_shrink([false, true])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
