@@ -104,6 +104,22 @@ impl Queue {
         self.current_id()
     }
 
+    /// The track a natural end of the current one would move to, if that is already settled.
+    /// Repeat-one and a shuffle that is about to reshuffle are not, so they give `None`.
+    pub fn peek_next(&self) -> Option<i64> {
+        if self.repeat == Repeat::One {
+            return None;
+        }
+        let index = match (self.current, self.shuffle) {
+            (None, _) => 0,
+            (Some(_), true) => *self.remaining.last()?,
+            (Some(current), false) if current + 1 < self.ids.len() => current + 1,
+            (Some(_), false) if self.repeat == Repeat::All => 0,
+            (Some(_), false) => return None,
+        };
+        self.ids.get(index).copied()
+    }
+
     pub fn previous(&mut self) -> Option<i64> {
         let next = if self.shuffle {
             self.history.pop()?
@@ -142,6 +158,26 @@ mod tests {
             assert!(seen.insert(id));
         }
         assert_eq!(seen.len(), 30);
+    }
+
+    #[test]
+    fn peek_next_matches_what_advance_picks() {
+        let mut q = Queue::default();
+        q.start(vec![10, 20, 30], 1);
+        assert_eq!(q.peek_next(), Some(30));
+        assert_eq!(q.advance(true), Some(30));
+        assert_eq!(q.peek_next(), None);
+        q.repeat = Repeat::All;
+        assert_eq!(q.peek_next(), Some(10));
+        q.repeat = Repeat::One;
+        assert_eq!(q.peek_next(), None);
+        q.repeat = Repeat::Off;
+        q.set_shuffle(true);
+        q.start(vec![1, 2, 3, 4], 0);
+        q.set_shuffle(true);
+        while let Some(next) = q.peek_next() {
+            assert_eq!(q.advance(true), Some(next));
+        }
     }
 
     #[test]

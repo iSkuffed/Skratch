@@ -398,3 +398,61 @@ fn mpv_dies_with_skratch_even_when_skratch_is_killed() {
     let _ = Command::new("kill").arg(mpv[0].to_string()).status();
     panic!("mpv {} outlived the process that started it", mpv[0]);
 }
+
+#[test]
+fn a_queued_file_follows_the_first_without_loading_again() {
+    if !mpv_available() {
+        eprintln!("skipping mpv integration test because mpv is not installed");
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let (first, second) = (dir.path().join("first.wav"), dir.path().join("second.wav"));
+    write_silence_wav(&first, 1);
+    write_silence_wav(&second, 3);
+    let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+    let mut player = Player::start_with_output(wake, Some("null")).unwrap();
+
+    player
+        .set_loudness(skratch::player::Loudness::Level)
+        .unwrap();
+    player
+        .set_loudness(skratch::player::Loudness::Album)
+        .unwrap();
+    player.set_fade(0.5).unwrap();
+    player.set_fade(1.0).unwrap();
+    player.load(&first).unwrap();
+    wait_for_event(&player, Duration::from_secs(3), |e| {
+        matches!(e, PlayerEvent::Started)
+    });
+    player.preload(&second).unwrap();
+    wait_for_event(&player, Duration::from_secs(4), |e| {
+        matches!(e, PlayerEvent::Ended)
+    });
+    // mpv goes on to the queued file by itself, which reports its own length
+    wait_for_event(&player, Duration::from_secs(3), |e| {
+        matches!(e, PlayerEvent::Started)
+    });
+    wait_for_event(
+        &player,
+        Duration::from_secs(2),
+        |e| matches!(e, PlayerEvent::Duration(d) if *d > 2.5),
+    );
+
+    // a queued file can be taken back before it plays
+    player.load(&first).unwrap();
+    wait_for_event(&player, Duration::from_secs(3), |e| {
+        matches!(e, PlayerEvent::Started)
+    });
+    player.preload(&second).unwrap();
+    player.clear_preload().unwrap();
+    wait_for_event(&player, Duration::from_secs(4), |e| {
+        matches!(e, PlayerEvent::Ended)
+    });
+    assert!(
+        player
+            .events
+            .recv_timeout(Duration::from_millis(800))
+            .map_or(true, |e| !matches!(e, PlayerEvent::Started)),
+        "a cleared file must not start"
+    );
+}

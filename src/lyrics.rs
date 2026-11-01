@@ -3,9 +3,14 @@
 //! then NetEase Cloud Music as a fallback when LRCLIB has nothing or is down, then (plain text
 //! only, and only if switched on) Genius.
 use crate::{model::Track, online, tagparse};
+use anyhow::Context;
 use anyhow::{Result, bail};
 use eframe::egui;
-use lofty::{prelude::*, tag::ItemKey};
+use lofty::{
+    file::TaggedFile,
+    prelude::*,
+    tag::{ItemKey, Tag, TagType},
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -529,6 +534,98 @@ fn find(track: &Track, dir: &Path, online: Online) -> Answer {
     }
 }
 
+/// Blocking lookup for batch use: the same chain as the Now playing panel (so lyrics that
+/// are already local cost no network call), returning the lyrics and where they came from.
+pub fn fetch(track: &Track, dir: &Path, online: Online) -> Option<(Lyrics, Origin)> {
+    let Answer { lyrics, origin, .. } = find(track, dir, online);
+    lyrics.zip(origin)
+}
+
+/// What `embed` did to the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Embedded {
+    Written,
+    /// The file's tag already holds exactly this text, so the file was not touched.
+    AlreadyThere,
+    NoLyrics,
+}
+
+/// Writes the track's local lyrics (never the network) into the audio file's own tag, synced
+/// ones as LRC text so players that read the tag still get the stamps.
+pub fn embed(track: &Track, dir: &Path) -> Result<Embedded> {
+    // find() with no online access is the local chain: yours, sidecar, tags, then the cache
+    let found = find(track, dir, Online::default());
+    let Some(lyrics) = found.lyrics else {
+        return Ok(Embedded::NoLyrics);
+    };
+    // the tags are what find() read them from, so there is nothing to write
+    if found.origin == Some(Origin::Tags) {
+        return Ok(Embedded::AlreadyThere);
+    }
+    let text = lyrics.to_text();
+    let mut file =
+        lofty::read_from_path(&track.path).context("this audio format cannot be read")?;
+    let held = file
+        .primary_tag()
+        .or_else(|| file.first_tag())
+        .and_then(|tag| tag.get_string(&ItemKey::Lyrics));
+    if held.is_some_and(|held| held.trim() == text.trim()) {
+        return Ok(Embedded::AlreadyThere);
+    }
+    let tag_type = avoid_id3v1(&mut file);
+    anyhow::ensure!(
+        file.supports_tag_type(tag_type),
+        "this audio format does not support tag editing"
+    );
+    if file.primary_tag().is_none() {
+        file.insert_tag(Tag::new(tag_type));
+    }
+    let tag = file
+        .primary_tag_mut()
+        .context("audio format has no writable primary tag")?;
+    anyhow::ensure!(
+        tag.insert_text(ItemKey::Lyrics, text),
+        "this tag type cannot hold lyrics"
+    );
+    // edit a copy and swap it in, so a failure halfway never leaves a damaged song behind
+    let metadata = std::fs::metadata(&track.path).context("inspect the audio file")?;
+    let parent = track.path.parent().context("audio file has no folder")?;
+    let extension = track
+        .path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .context("audio file has no UTF-8 extension")?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".skratch-edit-")
+        .suffix(&format!(".{extension}"))
+        .tempfile_in(parent)
+        .context("create temporary media file")?;
+    std::fs::copy(&track.path, temporary.path()).context("copy the audio file for editing")?;
+    std::fs::set_permissions(temporary.path(), metadata.permissions())
+        .context("keep the file's permissions")?;
+    file.save_to_path(temporary.path(), lofty::config::WriteOptions::default())
+        .context("write lyrics to the audio file")?;
+    temporary
+        .as_file()
+        .sync_all()
+        .context("sync the edited file")?;
+    std::fs::rename(temporary.path(), &track.path).context("replace the audio file")?;
+    temporary.keep().ok();
+    Ok(Embedded::Written)
+}
+
+/// An ID3v1 tag is too small for lyrics: move it to ID3v2 (same rule as the library's editor).
+fn avoid_id3v1(file: &mut TaggedFile) -> TagType {
+    let Some(mut old) = file.remove(TagType::Id3v1) else {
+        return file.primary_tag_type();
+    };
+    if file.primary_tag().is_none() {
+        old.re_map(TagType::Id3v2);
+        file.insert_tag(old);
+    }
+    file.primary_tag_type()
+}
+
 /// The first online lyrics that differ from `current`, preferring synced ones, and which
 /// service gave them. `Err` only when no source could be reached at all.
 fn other_source(
@@ -915,5 +1012,103 @@ mod tests {
         );
         assert_eq!(Origin::from_key(Some("genius")), Origin::Genius);
         assert_eq!(Origin::Genius.label(), "Genius");
+    }
+
+    /// A silent 8 kHz mono WAV, the smallest real file lofty will tag.
+    fn silent_wav(path: &Path) {
+        let pcm = [0_u8; 1600];
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&(36_u32 + pcm.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        for field in [16_u32, 1 | 1 << 16, 8000, 16000, 2 | 16 << 16] {
+            wav.extend_from_slice(&field.to_le_bytes());
+        }
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&pcm);
+        fs::write(path, wav).unwrap();
+    }
+
+    #[test]
+    fn fetch_answers_from_local_files_without_the_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let track = Track {
+            path: dir.path().join("song.mp3"),
+            ..Track::default()
+        };
+        let cache = dir.path().join("cache");
+        // nothing local and online off: no answer, and nothing asked
+        assert_eq!(fetch(&track, &cache, Online::default()), None);
+        fs::write(dir.path().join("song.lrc"), "[00:05.00]first invented line").unwrap();
+        // even with every service allowed, a local hit returns before any request is made
+        let online = Online {
+            allowed: true,
+            fallback: true,
+            genius: true,
+        };
+        assert_eq!(
+            fetch(&track, &cache, online),
+            Some((
+                Lyrics::Synced(vec![(5.0, "first invented line".into())]),
+                Origin::Sidecar
+            ))
+        );
+    }
+
+    #[test]
+    fn embedding_writes_the_lyrics_once_and_keeps_the_rest_of_the_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let song = dir.path().join("song.wav");
+        silent_wav(&song);
+        let track = Track {
+            path: song.clone(),
+            ..Track::default()
+        };
+        let cache = dir.path().join("cache");
+        assert_eq!(embed(&track, &cache).unwrap(), Embedded::NoLyrics);
+
+        // give the file a title first, to check it survives
+        let mut file = lofty::read_from_path(&song).unwrap();
+        let tag_type = avoid_id3v1(&mut file);
+        file.insert_tag(Tag::new(tag_type));
+        file.primary_tag_mut()
+            .unwrap()
+            .set_title("kept title".into());
+        file.save_to_path(&song, lofty::config::WriteOptions::default())
+            .unwrap();
+
+        fs::write(
+            dir.path().join("song.lrc"),
+            "[00:05.00]first invented line\n",
+        )
+        .unwrap();
+        assert_eq!(embed(&track, &cache).unwrap(), Embedded::Written);
+        let after = lofty::read_from_path(&song).unwrap();
+        assert_eq!(
+            after
+                .primary_tag()
+                .or_else(|| after.first_tag())
+                .unwrap()
+                .title()
+                .as_deref(),
+            Some("kept title")
+        );
+        assert_eq!(
+            embedded(&song),
+            Some(Lyrics::Synced(vec![(5.0, "first invented line".into())]))
+        );
+
+        // the same text again leaves the file alone
+        let bytes = fs::read(&song).unwrap();
+        assert_eq!(embed(&track, &cache).unwrap(), Embedded::AlreadyThere);
+        assert_eq!(fs::read(&song).unwrap(), bytes);
+
+        // the user's own lyrics replace what the tag holds
+        save(&cache, &track, "second invented line").unwrap();
+        assert_eq!(embed(&track, &cache).unwrap(), Embedded::Written);
+        assert_eq!(
+            embedded(&song),
+            Some(Lyrics::Plain("second invented line".into()))
+        );
     }
 }

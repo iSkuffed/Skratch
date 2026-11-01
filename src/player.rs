@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::net::Shutdown;
@@ -37,6 +38,44 @@ pub struct Player {
     _socket_dir: TempDir,
     next_request_id: u64,
     shutdown: Arc<AtomicBool>,
+    eq: [f32; 10],
+    level: bool,
+}
+
+/// How loudness differs from song to song is smoothed out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Loudness {
+    /// Songs play as they are.
+    #[default]
+    Off,
+    /// ReplayGain tags, one song at a time.
+    Track,
+    /// ReplayGain tags, keeping the balance between songs of an album.
+    Album,
+    /// No tags needed: a compressor evens out quiet and loud passages as it plays.
+    Level,
+}
+
+impl Loudness {
+    pub const ALL: [Self; 4] = [Self::Off, Self::Track, Self::Album, Self::Level];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Track => "Songs",
+            Self::Album => "Albums",
+            Self::Level => "Even out",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Off => "Play every song as it was mastered",
+            Self::Track => "Use ReplayGain tags to give every song the same loudness",
+            Self::Album => "Use ReplayGain tags but keep an album's songs in balance",
+            Self::Level => "No tags needed: smooth out quiet and loud passages as it plays",
+        }
+    }
 }
 
 /// Centre frequencies of the equalizer bands, in Hz.
@@ -77,6 +116,7 @@ impl Player {
             .arg("--demuxer-max-bytes=8MiB")
             .arg("--demuxer-max-back-bytes=1MiB")
             .arg("--pause=no")
+            .arg("--gapless-audio=yes")
             .arg("--load-scripts=no")
             .arg("--autoload-files=no")
             .arg(format!("--input-ipc-server={socket_arg}"));
@@ -135,6 +175,8 @@ impl Player {
             _socket_dir: socket_dir,
             next_request_id: 1,
             shutdown,
+            eq: [0.0; 10],
+            level: false,
         };
         for (id, property) in [
             (1, "time-pos"),
@@ -187,18 +229,75 @@ impl Player {
 
     /// Applies a ten-band equalizer (gains in dB, centred on `EQ_BANDS`); all zero removes it.
     pub fn set_eq(&mut self, gains: &[f32; 10]) -> Result<()> {
-        let filter = if gains.iter().all(|g| g.abs() < 0.05) {
+        self.eq = *gains;
+        self.apply_filters()
+    }
+
+    /// Chooses how loudness is levelled between songs.
+    pub fn set_loudness(&mut self, mode: Loudness) -> Result<()> {
+        let replaygain = match mode {
+            Loudness::Track => "track",
+            Loudness::Album => "album",
+            Loudness::Off | Loudness::Level => "no",
+        };
+        self.command(vec![
+            json!("set_property"),
+            json!("replaygain"),
+            json!(replaygain),
+        ])
+        .context("set mpv replaygain")?;
+        self.level = mode == Loudness::Level;
+        self.apply_filters()
+    }
+
+    /// Scales the sound by `gain` (1.0 is untouched) without moving the volume setting, for fades.
+    pub fn set_fade(&mut self, gain: f64) -> Result<()> {
+        let db = if gain >= 0.999 {
+            0.0
+        } else {
+            (20.0 * gain.max(0.001).log10()).max(-60.0)
+        };
+        self.command(vec![json!("set_property"), json!("volume-gain"), json!(db)])
+            .context("set mpv fade")
+    }
+
+    /// Queues `path` behind the current file so mpv joins the two without a gap.
+    pub fn preload(&mut self, path: &Path) -> Result<()> {
+        let path = path
+            .canonicalize()
+            .with_context(|| format!("resolve media path {}", path.display()))?;
+        let path = path
+            .to_str()
+            .ok_or_else(|| anyhow!("media path is not valid UTF-8: {}", path.display()))?;
+        self.command(vec![json!("loadfile"), json!(path), json!("append")])
+            .context("queue next file in mpv")
+    }
+
+    /// Forgets anything queued with `preload`.
+    pub fn clear_preload(&mut self) -> Result<()> {
+        self.command(vec![json!("playlist-clear")])
+            .context("clear mpv's queued file")
+    }
+
+    fn apply_filters(&mut self) -> Result<()> {
+        let mut filters: Vec<String> = Vec::new();
+        if !self.eq.iter().all(|g| g.abs() < 0.05) {
+            filters.extend(
+                EQ_BANDS.iter().zip(&self.eq).map(|(hz, g)| {
+                    format!("equalizer=f={hz}:t=o:w=1:g={:.1}", g.clamp(-12.0, 12.0))
+                }),
+            );
+        }
+        if self.level {
+            filters.push("dynaudnorm=f=300:g=15".to_owned());
+        }
+        let filter = if filters.is_empty() {
             String::new()
         } else {
-            let bands: Vec<String> = EQ_BANDS
-                .iter()
-                .zip(gains)
-                .map(|(hz, g)| format!("equalizer=f={hz}:t=o:w=1:g={:.1}", g.clamp(-12.0, 12.0)))
-                .collect();
-            format!("lavfi=[{}]", bands.join(","))
+            format!("lavfi=[{}]", filters.join(","))
         };
         self.command(vec![json!("set_property"), json!("af"), json!(filter)])
-            .context("set mpv equalizer")
+            .context("set mpv audio filters")
     }
 
     pub fn stop(&mut self) -> Result<()> {

@@ -109,7 +109,13 @@ impl Library {
                  PRIMARY KEY(track_id, source_path)
              );
              CREATE INDEX IF NOT EXISTS track_sources_by_source
-                 ON track_sources(source_path);",
+                 ON track_sources(source_path);
+             CREATE TABLE IF NOT EXISTS track_stats (
+                 track_id INTEGER PRIMARY KEY NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+                 plays INTEGER NOT NULL DEFAULT 0,
+                 last_played INTEGER,
+                 rating INTEGER NOT NULL DEFAULT 0
+             );",
             )
             .context("initialize music library database")?;
 
@@ -168,8 +174,9 @@ impl Library {
     pub fn tracks(&self) -> Result<Vec<Track>> {
         let mut statement = self.connection.prepare(
             "SELECT id, path, title, artist, album, album_artist, genre, year,
-                    track_number, disc_number, duration, artwork
-             FROM tracks
+                    track_number, disc_number, duration, artwork,
+                    COALESCE(plays, 0), last_played, COALESCE(rating, 0)
+             FROM tracks LEFT JOIN track_stats ON track_id = id
              ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE,
                       disc_number, track_number, title COLLATE NOCASE, path",
         )?;
@@ -177,6 +184,30 @@ impl Library {
             .query_map([], track_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(tracks)
+    }
+
+    /// Counts one finished play of `id` at `when` (seconds since the Unix epoch).
+    pub fn record_play(&mut self, id: i64, when: i64) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO track_stats(track_id, plays, last_played) VALUES (?1, 1, ?2)
+             ON CONFLICT(track_id) DO UPDATE SET plays = plays + 1, last_played = ?2",
+            params![id, when],
+        )?;
+        Ok(())
+    }
+
+    /// Gives these tracks `stars` (0 clears the rating).
+    pub fn rate(&mut self, ids: &[i64], stars: u8) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        for id in ids {
+            transaction.execute(
+                "INSERT INTO track_stats(track_id, rating) VALUES (?1, ?2)
+                 ON CONFLICT(track_id) DO UPDATE SET rating = ?2",
+                params![id, i64::from(stars.min(5))],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn scan(&mut self, force: bool) -> Result<ScanReport> {
@@ -731,6 +762,9 @@ fn track_from_row(row: &Row<'_>) -> rusqlite::Result<Track> {
             .and_then(|value| value.try_into().ok()),
         duration: row.get(10)?,
         artwork: row.get::<_, Option<String>>(11)?.map(PathBuf::from),
+        plays: row.get::<_, i64>(12)?.try_into().unwrap_or(0),
+        last_played: row.get(13)?,
+        rating: row.get::<_, i64>(14)?.clamp(0, 5) as u8,
     })
 }
 
@@ -738,8 +772,9 @@ fn track_by_id(connection: &Connection, id: i64) -> Result<Track> {
     connection
         .query_row(
             "SELECT id, path, title, artist, album, album_artist, genre, year,
-                    track_number, disc_number, duration, artwork
-             FROM tracks WHERE id = ?1",
+                    track_number, disc_number, duration, artwork,
+                    COALESCE(plays, 0), last_played, COALESCE(rating, 0)
+             FROM tracks LEFT JOIN track_stats ON track_id = id WHERE id = ?1",
             [id],
             track_from_row,
         )

@@ -453,3 +453,34 @@ fn a_cover_can_be_embedded_into_an_mp3_that_only_has_id3v1_tags() {
     let tagged = read_from_path(&track.path).unwrap();
     assert_eq!(tagged.primary_tag().unwrap().pictures().len(), 1);
 }
+
+#[test]
+fn plays_and_ratings_are_kept_across_edits_rescans_and_restarts() {
+    let temp = tempdir().unwrap();
+    let data = temp.path().join("data");
+    let music = temp.path().join("music");
+    fs::create_dir_all(&music).unwrap();
+    write_wav(&music.join("song.wav"));
+
+    let mut library = Library::open(&data).unwrap();
+    library.add_source(&music).unwrap();
+    library.scan(false).unwrap();
+    let id = library.tracks().unwrap()[0].id;
+    let fresh = &library.tracks().unwrap()[0];
+    assert_eq!((fresh.plays, fresh.last_played, fresh.rating), (0, None, 0));
+
+    library.record_play(id, 1_000).unwrap();
+    library.record_play(id, 2_000).unwrap();
+    library.rate(&[id], 4).unwrap();
+    library.edit(id, &edit_for("renamed.WAV")).unwrap();
+    library.scan(true).unwrap();
+    drop(library);
+
+    let library = Library::open(&data).unwrap();
+    let track = &library.tracks().unwrap()[0];
+    assert_eq!(track.id, id);
+    assert_eq!(
+        (track.plays, track.last_played, track.rating),
+        (2, Some(2_000), 4)
+    );
+}

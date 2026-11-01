@@ -25,6 +25,10 @@ pub enum Command {
     EditMany(Vec<(i64, MetadataEdit)>),
     /// Cover image for these tracks; the flag also embeds it into the audio files.
     SetCover(Vec<i64>, Vec<u8>, bool),
+    /// A track was played through (id, seconds since the Unix epoch).
+    Played(i64, i64),
+    /// Stars (0 clears) for these tracks.
+    Rate(Vec<i64>, u8),
 }
 
 pub enum Event {
@@ -147,6 +151,8 @@ impl Service {
                 }
                 match rx.recv_timeout(Duration::from_millis(250)) {
                     Ok(command) => {
+                        // Play counts and ratings change nothing on disk, so no rescan.
+                        let quiet = matches!(command, Command::Played(..) | Command::Rate(..));
                         // A panic inside a command (a tag or image library choking on one
                         // odd file) must not kill the worker for the rest of the session.
                         let result = catch_unwind(AssertUnwindSafe(|| match command {
@@ -155,6 +161,8 @@ impl Service {
                                 Ok(())
                             }
                             Command::Rescan => Ok(()),
+                            Command::Played(id, when) => library.record_play(id, when),
+                            Command::Rate(ids, stars) => library.rate(&ids, stars),
                             Command::Add(path) => library.add_source(&path),
                             Command::Remove(path) => library.remove_source(&path),
                             Command::Edit(id, edit) => {
@@ -205,7 +213,7 @@ impl Service {
                         if let Err(e) = result {
                             send(Event::Message(format!("{e:#}")));
                         }
-                        rescan = true;
+                        rescan = !quiet;
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(mpsc::RecvTimeoutError::Timeout) => {}

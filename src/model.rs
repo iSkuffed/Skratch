@@ -15,6 +15,15 @@ pub struct Track {
     pub disc_number: Option<u32>,
     pub duration: f64,
     pub artwork: Option<PathBuf>,
+    /// Times it has been played through (kept in the library database, not the file).
+    #[serde(default)]
+    pub plays: u32,
+    /// When it was last played, in seconds since the Unix epoch.
+    #[serde(default)]
+    pub last_played: Option<i64>,
+    /// Stars from 1 to 5; 0 means not rated.
+    #[serde(default)]
+    pub rating: u8,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

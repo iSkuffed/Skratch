@@ -1,7 +1,7 @@
 use crate::{
     artwork::Artwork,
     service::{self, Command, Event},
-    state::{NowPanel, Playlist, SavedState, Source},
+    state::{NowPanel, Playlist, SavedState, Show, Source},
     style::{self, Icon},
 };
 use eframe::egui::{self, Color32, CornerRadius, Frame, Margin, RichText};
@@ -25,6 +25,7 @@ use std::{
 };
 
 mod fetch;
+mod listen;
 mod lyricview;
 mod playing;
 mod setup;
@@ -58,6 +59,7 @@ enum View {
     Queue,
     Playing,
     Downloads,
+    Tidy,
     Playlist(usize),
 }
 impl View {
@@ -69,6 +71,7 @@ impl View {
             Self::Queue => "☰",
             Self::Playing => "▶",
             Self::Downloads => "⬇",
+            Self::Tidy => "🔧",
             Self::Playlist(_) => "♫",
         }
     }
@@ -80,6 +83,7 @@ impl View {
             Self::Queue => "Play queue",
             Self::Playing => "Now playing",
             Self::Downloads => "Downloads",
+            Self::Tidy => "Tidy up",
             Self::Playlist(_) => "Playlist",
         }
     }
@@ -91,6 +95,10 @@ enum Sort {
     Title,
     Year,
     Filename,
+    /// Most recently played first (with Descending on).
+    Recent,
+    Plays,
+    Rating,
 }
 impl Sort {
     fn title(self) -> &'static str {
@@ -100,6 +108,9 @@ impl Sort {
             Self::Title => "Title",
             Self::Year => "Year",
             Self::Filename => "Filename",
+            Self::Recent => "Last played",
+            Self::Plays => "Play count",
+            Self::Rating => "Rating",
         }
     }
 }
@@ -280,6 +291,7 @@ pub struct Skratch {
     /// When the last frame began. The watcher thread steps in when frames stop coming (a
     /// minimised window gets none on Wayland), so playback and the media keys keep working.
     frame_at: Instant,
+    listen: listen::Listen,
 }
 
 impl Skratch {
@@ -402,6 +414,7 @@ impl Skratch {
             reveal: playing::Reveal::DONE,
             drawer: Default::default(),
             frame_at: Instant::now(),
+            listen: Default::default(),
         };
         app.refresh_tools();
         app
@@ -451,7 +464,9 @@ impl Skratch {
                     Sort::Artist => (t.artist.to_lowercase(), t.album.to_lowercase()),
                     Sort::Title => (t.title.to_lowercase(), String::new()),
                     Sort::Year => (t.album.to_lowercase(), String::new()),
-                    Sort::Filename => (String::new(), String::new()),
+                    Sort::Filename | Sort::Recent | Sort::Plays | Sort::Rating => {
+                        (String::new(), String::new())
+                    }
                 };
                 (i, first, second)
             })
@@ -464,6 +479,9 @@ impl Skratch {
                 Sort::Title => a1.cmp(b1),
                 Sort::Year => a.year.cmp(&b.year).then_with(|| a1.cmp(b1)),
                 Sort::Filename => a.path.cmp(&b.path),
+                Sort::Recent => a.last_played.cmp(&b.last_played),
+                Sort::Plays => a.plays.cmp(&b.plays),
+                Sort::Rating => a.rating.cmp(&b.rating),
             }
             .then_with(|| a.disc_number.cmp(&b.disc_number))
             .then_with(|| a.track_number.cmp(&b.track_number))
@@ -506,7 +524,7 @@ impl Skratch {
             .tracks
             .iter()
             .enumerate()
-            .filter(|(_, t)| matches_query(t, &query))
+            .filter(|(_, t)| self.state.show.keeps(t) && matches_query(t, &query))
             .map(|(i, _)| i)
             .collect();
         let mut filtered = std::mem::take(&mut self.filtered);
@@ -570,7 +588,10 @@ impl Skratch {
         };
         if self.player.is_none() {
             match Player::start(self.wake.clone()) {
-                Ok(player) => self.player = Some(player),
+                Ok(player) => {
+                    self.player = Some(player);
+                    self.listen.new_player();
+                }
                 Err(e) => {
                     self.message(format!("Cannot start playback: {e:#}"));
                     return;
@@ -578,12 +599,18 @@ impl Skratch {
             }
         }
         let player = self.player.as_mut().unwrap();
+        // a fade-in starts silent, so there is no burst before the first update
+        let gain = listen::fade_gain(self.state.fade_secs, position, track.duration);
         let result = player
             .set_volume(self.state.volume)
             .and_then(|_| player.set_eq(&self.state.eq))
+            .and_then(|_| player.set_loudness(self.state.loudness))
+            .and_then(|_| player.set_fade(gain))
             .and_then(|_| player.load(&track.path));
         match result {
             Ok(()) => {
+                self.listen.restart();
+                self.listen.gain = gain;
                 self.loaded = true;
                 self.playing = true;
                 self.duration = track.duration;
@@ -774,6 +801,7 @@ impl Skratch {
                     self.sources = sources;
                     self.tracks = tracks;
                     self.art.invalidate_changed();
+                    self.listen.tidy = None;
                     self.by_id = self
                         .tracks
                         .iter()
@@ -844,6 +872,7 @@ impl Skratch {
                 PlayerEvent::Position(position) => {
                     if self.loaded && self.pending_seek.is_none() && position.is_finite() {
                         self.state.position = position.max(0.0);
+                        self.listen.pos_at = Instant::now();
                     }
                 }
                 PlayerEvent::Duration(duration) => {
@@ -858,8 +887,16 @@ impl Skratch {
                 }
                 PlayerEvent::Volume(volume) => self.state.volume = volume.clamp(0.0, 100.0),
                 PlayerEvent::Ended if self.loaded => {
-                    if self.state.queue.advance(true).is_some() {
-                        self.start_current(0.0);
+                    if self.listen.sleep == Some(listen::Sleep::EndOfSong) {
+                        self.listen.sleep = None;
+                        self.stop();
+                    } else if let Some(next) = self.state.queue.advance(true) {
+                        // mpv has already moved on to a song lined up for it
+                        if self.listen.preloaded == Some(next) {
+                            self.adopt_preloaded();
+                        } else {
+                            self.start_current(0.0);
+                        }
                     } else {
                         self.stop();
                     }
@@ -918,6 +955,7 @@ impl Skratch {
             self.save();
             self.last_save = Instant::now();
         }
+        self.playback_tick(ctx);
         changed
     }
 
@@ -967,6 +1005,7 @@ impl Skratch {
             View::Queue,
             View::Playing,
             View::Downloads,
+            View::Tidy,
         ] {
             if ui
                 .selectable_label(
@@ -1106,6 +1145,9 @@ impl Skratch {
             egui::Checkbox::new(&mut self.state.lyrics_genius, "Also try Genius (plain text)"),
         )
         .on_hover_text("Last, when the others have nothing: genius.com is asked with the artist and title and its song page is read for the words. Plain lyrics only, no timing. Genius's terms do not allow automated use, so this is off until you switch it on.");
+        ui.checkbox(&mut self.state.lyrics_embed, "Save lyrics into song files")
+            .on_hover_text("Once a song has been played through, and when you look lyrics up for many songs, the lyrics Skratch holds for it are also written into the audio file's own tags. This changes your files, so it is off until you switch it on.");
+        ui.collapsing("Playback", |ui| self.playback_settings(ui));
         ui.collapsing("Effects", |ui| {
             let effects = &mut self.state.effects;
             ui.checkbox(&mut effects.animations, "Animations")
@@ -1414,6 +1456,7 @@ impl Skratch {
                                         self.action = Some(Action::Volume(volume));
                                     }
                                     self.eq_button(ui);
+                                    self.sleep_button(ui);
                                 },
                             );
                         });
@@ -1782,7 +1825,28 @@ impl Skratch {
         }
         ui.add_enabled_ui(some, |ui| {
             ui.menu_button("Add to playlist", |ui| self.playlist_menu(ui, ids));
+            ui.menu_button("Rate", |ui| self.rate_menu(ui, ids));
         });
+        let free = some && !self.job_running();
+        if ui
+            .add_enabled(
+                free && self.state.lyrics_online,
+                egui::Button::new("Find lyrics"),
+            )
+            .on_hover_text("Look up lyrics for every one of these songs in the background, using the services ticked in the settings. Turn on \"Look up lyrics online\" first.")
+            .clicked()
+        {
+            self.lyrics_job(ids, false);
+            done = true;
+        }
+        if ui
+            .add_enabled(free, egui::Button::new("Save lyrics into files"))
+            .on_hover_text("Write the lyrics Skratch already holds for these songs into the audio files' own tags, so other players show them too.")
+            .clicked()
+        {
+            self.lyrics_job(ids, true);
+            done = true;
+        }
         if ui
             .add_enabled(
                 some && self.pick_rx.is_none(),
@@ -1837,6 +1901,7 @@ impl Skratch {
             self.select_mode = false;
             self.selected.clear();
         }
+        self.job_line(ui);
         ui.horizontal(|ui| {
             if ui.selectable_label(self.select_mode, "Select").clicked() {
                 self.select_mode = !self.select_mode;
@@ -2024,11 +2089,21 @@ impl Skratch {
             egui::FontId::proportional(15.0),
             title_color,
         );
-        let detail = format!(
+        let mut detail = format!(
             "{}  -  {}",
             display(&track.artist, "Unknown artist"),
             display(&track.album, "Unknown album")
         );
+        if track.rating > 0 {
+            detail.push_str(&format!("  ·  {}", listen::stars(track.rating)));
+        }
+        if track.plays > 0 {
+            detail.push_str(&format!(
+                "  ·  {} play{}",
+                track.plays,
+                if track.plays == 1 { "" } else { "s" }
+            ));
+        }
         clip.text(
             egui::pos2(text_left, rect.top() + 29.0),
             egui::Align2::LEFT_CENTER,
@@ -2166,6 +2241,13 @@ impl Skratch {
             });
             return;
         }
+        if self.view == View::Tidy {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                enter(ui);
+                self.tidy_ui(ui)
+            });
+            return;
+        }
         if let View::Playlist(p) = self.view {
             egui::CentralPanel::default().show_inside(ui, |ui| {
                 enter(ui);
@@ -2191,8 +2273,15 @@ impl Skratch {
             let old = (self.sort, self.descending);
             ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt("sort").selected_text(self.sort.title()).show_ui(ui, |ui| {
-                    for sort in [Sort::Album, Sort::Artist, Sort::Title, Sort::Year, Sort::Filename] { ui.selectable_value(&mut self.sort, sort, sort.title()); }
+                    for sort in [Sort::Album, Sort::Artist, Sort::Title, Sort::Year, Sort::Filename, Sort::Recent, Sort::Plays, Sort::Rating] { ui.selectable_value(&mut self.sort, sort, sort.title()); }
                 });
+                // newest, most played and best rated first is what these are for
+                if old.0 != self.sort && matches!(self.sort, Sort::Recent | Sort::Plays | Sort::Rating) { self.descending = true; }
+                let shown = self.state.show;
+                egui::ComboBox::from_id_salt("show").selected_text(shown.title()).show_ui(ui, |ui| {
+                    for show in Show::ALL { ui.selectable_value(&mut self.state.show, show, show.title()); }
+                });
+                if shown != self.state.show { self.rebuild(); }
                 ui.checkbox(&mut self.descending, "Descending");
                 ui.label(RichText::new(if self.state.double_click { "Double-click a track to play. Right-click for queue options." } else { "Click a track to play. Right-click for queue options." }).small().weak());
             });

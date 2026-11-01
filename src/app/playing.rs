@@ -833,6 +833,8 @@ impl Skratch {
                 ui.label(RichText::new(album).size(16.0).color(style::CREAM_DIM))
             });
         }
+        ui.add_space(10.0);
+        reveal.show(ui, |ui| self.star_row(ui, track));
     }
 
     /// Everything about the lyrics: whether and how they show, and fixing wrong ones (type

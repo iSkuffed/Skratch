@@ -256,6 +256,41 @@ pub enum Source {
     Tracks(Vec<i64>),
 }
 
+/// Which tracks the library lists show.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Show {
+    #[default]
+    All,
+    /// Never played through.
+    Unplayed,
+    /// Played at least once.
+    Played,
+    /// Given at least one star.
+    Rated,
+}
+
+impl Show {
+    pub const ALL: [Self; 4] = [Self::All, Self::Unplayed, Self::Played, Self::Rated];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::All => "All songs",
+            Self::Unplayed => "Not played yet",
+            Self::Played => "Played",
+            Self::Rated => "Rated",
+        }
+    }
+
+    pub fn keeps(self, track: &skratch::model::Track) -> bool {
+        match self {
+            Self::All => true,
+            Self::Unplayed => track.plays == 0,
+            Self::Played => track.plays > 0,
+            Self::Rated => track.rating > 0,
+        }
+    }
+}
+
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SavedState {
@@ -285,6 +320,17 @@ pub struct SavedState {
     /// Also asks Genius (plain lyrics, taken from its web pages) when the other services have
     /// nothing. Off until the user switches it on.
     pub lyrics_genius: bool,
+    /// Writes lyrics into a song's own file once it has been played through, from what Skratch
+    /// already holds for it. Off, because it changes the user's files.
+    pub lyrics_embed: bool,
+    /// How loudness is levelled between songs.
+    pub loudness: skratch::player::Loudness,
+    /// Gapless playback is on unless this is set (stored inverted so an old save gets it).
+    pub gapless_off: bool,
+    /// Seconds each song fades out and the next fades in; 0 for none.
+    pub fade_secs: u8,
+    /// Which tracks the library lists show.
+    pub show: Show,
     pub lyric_style: LyricStyle,
     pub effects: Effects,
     pub visualizer: Visualizer,
