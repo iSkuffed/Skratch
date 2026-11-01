@@ -82,6 +82,7 @@ pub enum Lyrics {
 impl Lyrics {
     /// Lines with `[mm:ss.xx]` stamps become `Synced`; anything else is kept as plain text.
     pub fn from_text(text: &str) -> Option<Self> {
+        let text = &printable(text);
         let synced = parse_lrc(text);
         if !synced.is_empty() {
             return Some(Self::Synced(synced));
@@ -89,6 +90,23 @@ impl Lyrics {
         let text = text.trim();
         (!text.is_empty()).then(|| Self::Plain(text.replace("\r\n", "\n")))
     }
+}
+
+/// The text with every unusual space turned into a plain one and invisible characters dropped.
+/// Services such as NetEase use spaces (U+2005, U+205F) that the fonts have no glyph for, which
+/// showed as boxes between words. Done on every read, so lyrics saved earlier are fixed too.
+fn printable(text: &str) -> String {
+    text.chars()
+        .filter_map(|c| match c {
+            '\n' | '\r' => Some(c),
+            c if c.is_whitespace() => Some(' '),
+            '\u{ad}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' => None,
+            '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}' => None,
+            '\u{fe00}'..='\u{fe0f}' => None,
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect()
 }
 
 impl Lyrics {
@@ -845,6 +863,18 @@ impl Lookup {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn odd_spaces_and_invisible_characters_become_plain_text() {
+        let dirty = "[00:01.00]I\u{2005}can't\u{205f}concentrate\u{200b}\n[00:02.00]he\u{a0}gon'\u{feff} die";
+        assert_eq!(
+            Lyrics::from_text(dirty),
+            Some(Lyrics::Synced(vec![
+                (1.0, "I can't concentrate".into()),
+                (2.0, "he gon' die".into())
+            ]))
+        );
+    }
+
     #[test]
     fn a_service_that_failed_is_left_alone_for_a_while() {
         use std::cell::Cell;
