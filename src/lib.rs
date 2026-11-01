@@ -11,5 +11,6 @@ pub mod online;
 pub mod player;
 pub mod queue;
 pub mod rhyme;
+pub mod suggest;
 pub mod tagparse;
 pub mod tools;

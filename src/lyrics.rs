@@ -200,12 +200,13 @@ fn stamp(text: &str) -> Option<f64> {
 
 /// The best LRCLIB search result for a track of `duration` seconds: it has to be about as
 /// long as the file (the same song, not a live cut) and synced lyrics win over plain.
-fn pick(results: &Value, duration: f64) -> Option<Lyrics> {
+fn pick(results: &Value, duration: f64, skip: &[String]) -> Option<Lyrics> {
     let text = |item: &Value, key: &str| {
         item[key]
             .as_str()
             .filter(|t| !t.trim().is_empty())
             .and_then(Lyrics::from_text)
+            .filter(|l| !is_rejected(skip, l))
     };
     let close = |item: &&Value| {
         duration <= 0.0
@@ -229,18 +230,18 @@ fn search(query: &[(&str, &str)]) -> Result<Value> {
     })
 }
 
-fn lrclib(track: &Track) -> Result<Option<Lyrics>> {
+fn lrclib(track: &Track, skip: &[String]) -> Result<Option<Lyrics>> {
     let title = tagparse::strip_noise(&track.title);
     let artist = track.artist.trim();
     if !artist.is_empty() {
         let found = search(&[("track_name", &title), ("artist_name", artist)])?;
-        if let Some(lyrics) = pick(&found, track.duration) {
+        if let Some(lyrics) = pick(&found, track.duration, skip) {
             return Ok(Some(lyrics));
         }
     }
     let q = format!("{artist} {title}");
     let found = search(&[("q", q.trim())])?;
-    Ok(pick(&found, track.duration))
+    Ok(pick(&found, track.duration, skip))
 }
 
 /// NetEase song ids worth fetching lyrics for: about as long as the file and by the same
@@ -293,7 +294,7 @@ fn without_credits(lrc: &str) -> String {
 
 /// NetEase Cloud Music's public search and lyric endpoints. Unofficial and liable to change,
 /// so callers treat a failure here as "this source did not answer", never as fatal.
-fn netease(track: &Track) -> Result<Option<Lyrics>> {
+fn netease(track: &Track, skip: &[String]) -> Result<Option<Lyrics>> {
     let q = format!(
         "{} {}",
         track.artist.trim(),
@@ -315,6 +316,7 @@ fn netease(track: &Track) -> Result<Option<Lyrics>> {
         if let Some(lyrics) = answer["lrc"]["lyric"]
             .as_str()
             .and_then(|lrc| Lyrics::from_text(&without_credits(lrc)))
+            .filter(|l| !is_rejected(skip, l))
         {
             return Ok(Some(lyrics));
         }
@@ -323,9 +325,10 @@ fn netease(track: &Track) -> Result<Option<Lyrics>> {
 }
 
 /// Genius's plain lyrics for the track.
-fn genius(track: &Track) -> Result<Option<Lyrics>> {
+fn genius(track: &Track, skip: &[String]) -> Result<Option<Lyrics>> {
     Ok(crate::genius::lyrics(track.artist.trim(), &track.title)?
-        .and_then(|text| Lyrics::from_text(&text)))
+        .and_then(|text| Lyrics::from_text(&text))
+        .filter(|l| !is_rejected(skip, l)))
 }
 
 fn embedded(path: &Path) -> Option<Lyrics> {
@@ -367,6 +370,57 @@ pub fn restore(dir: &Path, track: &Track) {
 
 pub fn has_user_version(dir: &Path, track: &Track) -> bool {
     user_file(dir, track).exists()
+}
+
+/// Lyrics the user called wrong for a track, one short fingerprint per line.
+fn rejected_file(dir: &Path, track: &Track) -> PathBuf {
+    cache_file(dir, track).with_extension("rejected")
+}
+
+/// Of the words only, so the timed and the plain version of the same lyrics are one answer.
+fn fingerprint(lyrics: &Lyrics) -> String {
+    let words = match lyrics {
+        Lyrics::Plain(text) => text.clone(),
+        Lyrics::Synced(lines) => lines.iter().map(|(_, text)| text.as_str()).collect(),
+    };
+    let text: String = words.chars().filter(|c| !c.is_whitespace()).collect();
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn rejected(dir: &Path, track: &Track) -> Vec<String> {
+    fs::read_to_string(rejected_file(dir, track))
+        .map(|text| text.lines().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+fn is_rejected(skip: &[String], lyrics: &Lyrics) -> bool {
+    !skip.is_empty() && skip.contains(&fingerprint(lyrics))
+}
+
+/// Remembers these lyrics as wrong for this track: no online lookup will offer them again
+/// (typed, imported and `.lrc` lyrics are never refused). The remembered online answer goes too.
+pub fn reject(dir: &Path, track: &Track, lyrics: &Lyrics) {
+    let mut all = rejected(dir, track);
+    let print = fingerprint(lyrics);
+    if !all.contains(&print) {
+        all.push(print);
+        let _ = fs::create_dir_all(dir)
+            .and_then(|()| fs::write(rejected_file(dir, track), all.join("\n")));
+    }
+    let _ = fs::remove_file(cache_file(dir, track));
+}
+
+pub fn has_rejected(dir: &Path, track: &Track) -> bool {
+    !rejected(dir, track).is_empty()
+}
+
+/// Lets previously refused lyrics be offered again.
+pub fn forget_rejected(dir: &Path, track: &Track) {
+    let _ = fs::remove_file(rejected_file(dir, track));
 }
 
 /// Keeps an online answer (or the lack of one) so the next play needs no network.
@@ -522,21 +576,22 @@ fn find(track: &Track, dir: &Path, online: Online) -> Answer {
         return local(None, Origin::Earlier);
     }
     let mut notes = Notes::new();
-    let primary = OUTAGES.ask(Origin::Lrclib, || lrclib(track));
+    let skip = rejected(dir, track);
+    let primary = OUTAGES.ask(Origin::Lrclib, || lrclib(track, &skip));
     note("LRCLIB", &primary, &mut notes);
     // "nothing" is only remembered when every source we asked actually answered
     let mut complete = primary.is_ok();
     let mut lyrics = primary.ok().flatten();
     let mut origin = Origin::Lrclib;
     if lyrics.is_none() && online.fallback {
-        let second = OUTAGES.ask(Origin::NetEase, || netease(track));
+        let second = OUTAGES.ask(Origin::NetEase, || netease(track, &skip));
         note("NetEase", &second, &mut notes);
         complete &= second.is_ok();
         lyrics = second.ok().flatten();
         origin = Origin::NetEase;
     }
     if lyrics.is_none() && online.genius {
-        let third = OUTAGES.ask(Origin::Genius, || genius(track));
+        let third = OUTAGES.ask(Origin::Genius, || genius(track, &skip));
         note("Genius", &third, &mut notes);
         complete &= third.is_ok();
         lyrics = third.ok().flatten();
@@ -658,24 +713,25 @@ fn other_source(
     track: &Track,
     current: Option<&Lyrics>,
     online: Online,
+    skip: &[String],
 ) -> Result<Option<(Lyrics, Origin)>> {
     let mut found = Vec::new();
     let mut errors = Vec::new();
     let mut answered = 0;
     let mut sources: Vec<(Origin, Result<Option<Lyrics>>)> = vec![(
         Origin::Lrclib,
-        OUTAGES.ask(Origin::Lrclib, || lrclib(track)),
+        OUTAGES.ask(Origin::Lrclib, || lrclib(track, skip)),
     )];
     if online.fallback {
         sources.push((
             Origin::NetEase,
-            OUTAGES.ask(Origin::NetEase, || netease(track)),
+            OUTAGES.ask(Origin::NetEase, || netease(track, skip)),
         ));
     }
     if online.genius {
         sources.push((
             Origin::Genius,
-            OUTAGES.ask(Origin::Genius, || genius(track)),
+            OUTAGES.ask(Origin::Genius, || genius(track, skip)),
         ));
     }
     for (origin, answer) in sources {
@@ -825,7 +881,8 @@ impl Lookup {
         let (tx, ctx) = (self.other.0.clone(), ctx.clone());
         let (track, dir) = (track.clone(), dir.to_path_buf());
         std::thread::spawn(move || {
-            let result = other_source(&track, current.as_ref(), online);
+            let skip = rejected(&dir, &track);
+            let result = other_source(&track, current.as_ref(), online, &skip);
             if let Ok(Some((lyrics, origin))) = &result {
                 // the user's own file would hide the new lyrics on the next play
                 if user_file(&dir, &track).exists() {
@@ -837,6 +894,27 @@ impl Lookup {
             let _ = tx.send((track.path, result));
             ctx.request_repaint();
         });
+    }
+
+    /// Calls the lyrics on show wrong, when they came from an online service, so they are never
+    /// offered for this track again. Returns whether there was anything to refuse.
+    pub fn reject_shown(&self, dir: &Path, track: &Track) -> bool {
+        match (&self.status, self.online_shown()) {
+            (Status::Found(lyrics), true) => {
+                reject(dir, track, lyrics);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The lyrics on show were found by an online service (so they can be refused).
+    pub fn online_shown(&self) -> bool {
+        matches!(self.status, Status::Found(_))
+            && matches!(
+                self.origin,
+                Some(Origin::Lrclib | Origin::NetEase | Origin::Genius | Origin::Earlier)
+            )
     }
 
     /// Looks again, e.g. after a network failure.
@@ -933,11 +1011,42 @@ mod tests {
             {"duration": 180.0, "syncedLyrics": "[00:02.00]right one", "plainLyrics": "plain"},
         ]);
         assert_eq!(
-            pick(&results, 180.4),
+            pick(&results, 180.4, &[]),
             Some(Lyrics::Synced(vec![(2.0, "right one".into())]))
         );
-        assert_eq!(pick(&results, 30.0), None);
-        assert_eq!(pick(&json!([]), 180.0), None);
+        assert_eq!(pick(&results, 30.0, &[]), None);
+        assert_eq!(pick(&json!([]), 180.0, &[]), None);
+    }
+
+    #[test]
+    fn refused_lyrics_are_skipped_for_the_next_best_result() {
+        let results = json!([
+            {"duration": 180.0, "syncedLyrics": "[00:01.00]wrong words"},
+            {"duration": 180.0, "syncedLyrics": "[00:02.00]right words"},
+        ]);
+        let wrong = Lyrics::from_text("[00:01.00]wrong words").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let track = Track::default();
+        assert!(!has_rejected(dir.path(), &track));
+        reject(dir.path(), &track, &wrong);
+        reject(dir.path(), &track, &wrong);
+        assert_eq!(rejected(dir.path(), &track).len(), 1);
+        let skip = rejected(dir.path(), &track);
+        assert_eq!(
+            pick(&results, 180.0, &skip),
+            Some(Lyrics::Synced(vec![(2.0, "right words".into())]))
+        );
+        // spacing does not make it a different answer
+        assert!(is_rejected(
+            &skip,
+            &Lyrics::from_text("[00:01.00]wrong  words").unwrap()
+        ));
+        assert!(is_rejected(
+            &skip,
+            &Lyrics::from_text("wrong words").unwrap()
+        ));
+        forget_rejected(dir.path(), &track);
+        assert!(!has_rejected(dir.path(), &track));
     }
 
     #[test]

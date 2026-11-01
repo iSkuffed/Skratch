@@ -50,6 +50,7 @@ enum Quick {
     Type,
     Import,
     Clear,
+    Wrong,
     ToggleLyrics,
     Style(VizStyle),
     VizOff,
@@ -68,6 +69,9 @@ impl Quick {
             Self::Type => "Type the lyrics in yourself",
             Self::Import => "Bring the lyrics in from a .lrc or .txt file",
             Self::Clear => "Wrong lyrics: forget them and stop looking for this track",
+            Self::Wrong => {
+                "Wrong lyrics: never offer these again for this track, and look for different ones"
+            }
             Self::ToggleLyrics => "Show or hide the lyrics",
             Self::Style(_) => "Draw the visualizer this way",
             Self::VizOff => "Turn the visualizer off",
@@ -340,6 +344,16 @@ impl Skratch {
                 scale,
             );
 
+            // suggested fixes, above the record; hidden when the window is too short for them
+            let card_height = (centre.y - r * 1.05 - 18.0 - area.top()).min(190.0);
+            if card_height >= 128.0 {
+                let card = Rect::from_min_size(
+                    pos2(area.left() + 16.0, area.top() + 10.0),
+                    vec2(240.0, card_height),
+                );
+                self.suggest_card(ui, &track, card);
+            }
+
             let left = centre.x + r * 1.9 + 30.0;
             let panel = egui::Rect::from_min_max(
                 pos2(left, area.top() + 14.0),
@@ -566,7 +580,11 @@ impl Skratch {
                 (first.0, first.1, false),
                 (Quick::Type, "Type", false),
                 (Quick::Import, "Import", false),
-                (Quick::Clear, "Clear", false),
+                if self.lyrics.online_shown() {
+                    (Quick::Wrong, "Wrong", false)
+                } else {
+                    (Quick::Clear, "Clear", false)
+                },
                 (
                     Quick::ToggleLyrics,
                     if cfg.lyrics { "Hide" } else { "Show" },
@@ -589,7 +607,12 @@ impl Skratch {
         let dir = self.data_dir.join("lyrics");
         if matches!(
             quick,
-            Quick::LookUp | Quick::TryAgain | Quick::Automatic | Quick::Type | Quick::Import
+            Quick::LookUp
+                | Quick::TryAgain
+                | Quick::Automatic
+                | Quick::Type
+                | Quick::Import
+                | Quick::Wrong
         ) {
             self.state.visualizer.lyrics = true;
         }
@@ -603,6 +626,7 @@ impl Skratch {
             Quick::Type => self.lyrics.editing = Some(String::new()),
             Quick::Import => self.import_lyrics_file(ctx),
             Quick::Clear => self.save_lyrics(&dir, track, ""),
+            Quick::Wrong => self.wrong_lyrics(&dir, track),
             Quick::ToggleLyrics => self.state.visualizer.lyrics = !self.state.visualizer.lyrics,
             Quick::Style(style) => {
                 self.state.visualizer.style = style;
@@ -891,6 +915,32 @@ impl Skratch {
                 acted = true;
             }
         });
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    self.lyrics.online_shown(),
+                    egui::Button::new("Wrong lyrics, find others"),
+                )
+                .on_hover_text(
+                    "These online lyrics are wrong: never offer them for this track again and \
+                     look for different ones. Clear lyrics does the same but then stops looking.",
+                )
+                .clicked()
+            {
+                self.wrong_lyrics(&dir, track);
+                acted = true;
+            }
+            if lyrics::has_rejected(&dir, track)
+                && ui
+                    .button("Allow refused lyrics again")
+                    .on_hover_text("Forget which lyrics were called wrong for this track")
+                    .clicked()
+            {
+                lyrics::forget_rejected(&dir, track);
+                self.lyrics.ask_again(&dir, track);
+                acted = true;
+            }
+        });
         let online = self.state.lyric_sources();
         ui.horizontal_wrapped(|ui| {
             let button = ui
@@ -976,7 +1026,17 @@ impl Skratch {
         }
     }
 
+    /// Refuses the online lyrics on show for good and looks for different ones.
+    fn wrong_lyrics(&mut self, dir: &std::path::Path, track: &Track) {
+        self.lyrics.reject_shown(dir, track);
+        self.lyrics.ask_again(dir, track);
+    }
+
     fn save_lyrics(&mut self, dir: &std::path::Path, track: &Track, text: &str) {
+        // clearing online lyrics also keeps them from coming back with "Automatic"
+        if text.is_empty() {
+            self.lyrics.reject_shown(dir, track);
+        }
         match lyrics::save(dir, track, text) {
             Ok(()) => self.lyrics.retry(),
             Err(error) => self.message(format!("Could not save the lyrics: {error}")),

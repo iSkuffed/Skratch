@@ -30,6 +30,7 @@ mod lyricview;
 mod playing;
 mod setup;
 mod shell;
+mod suggest;
 mod visualizer;
 
 pub use shell::Shell;
@@ -294,6 +295,7 @@ pub struct Skratch {
     /// minimised window gets none on Wayland), so playback and the media keys keep working.
     frame_at: Instant,
     listen: listen::Listen,
+    suggest: suggest::Suggest,
 }
 
 impl Skratch {
@@ -358,7 +360,7 @@ impl Skratch {
             download_url: String::new(),
             download_status: String::new(),
             download_log: std::collections::VecDeque::new(),
-            wake,
+            wake: wake.clone(),
             playing: false,
             loaded: false,
             pending_seek: None,
@@ -418,6 +420,7 @@ impl Skratch {
             drawer: Default::default(),
             frame_at: Instant::now(),
             listen: Default::default(),
+            suggest: suggest::Suggest::new(wake.clone()),
         };
         app.refresh_tools();
         app
@@ -975,6 +978,7 @@ impl Skratch {
             self.last_save = Instant::now();
         }
         self.playback_tick(ctx);
+        self.suggest_tick(ctx);
         changed
     }
 
@@ -1166,6 +1170,20 @@ impl Skratch {
         .on_hover_text("Last, when the others have nothing: genius.com is asked with the artist and title and its song page is read for the words. Plain lyrics only, no timing. Genius's terms do not allow automated use, so this is off until you switch it on.");
         ui.checkbox(&mut self.state.lyrics_embed, "Save lyrics into song files")
             .on_hover_text("Once a song has been played through, and when you look lyrics up for many songs, the lyrics Skratch holds for it are also written into the audio file's own tags. This changes your files, so it is off until you switch it on.");
+        let mut suggest = !self.state.suggest_off;
+        ui.checkbox(&mut suggest, "Suggest fixes for songs")
+            .on_hover_text("Songs missing an album, year, track number or cover are looked up on MusicBrainz, iTunes and the Cover Art Archive, which are sent the artist, title and length. A card on Now playing offers what turns up; nothing changes until you press Apply, and then the tags and cover are written into the song's file.");
+        self.state.suggest_off = !suggest;
+        let mut sweep = !self.state.suggest_sweep_off;
+        ui.add_enabled(
+            suggest,
+            egui::Checkbox::new(&mut sweep, "Also check other songs in the background"),
+        )
+        .on_hover_text(format!(
+            "One song at a time, the one lined up next first, so the card is ready when it starts. {} looked up so far this time.",
+            self.suggest.looked_up
+        ));
+        self.state.suggest_sweep_off = !sweep;
         ui.collapsing("Playback", |ui| self.playback_settings(ui));
         ui.collapsing("Effects", |ui| {
             let effects = &mut self.state.effects;

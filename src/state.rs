@@ -323,6 +323,11 @@ pub struct SavedState {
     /// Writes lyrics into a song's own file once it has been played through, from what Skratch
     /// already holds for it. Off, because it changes the user's files.
     pub lyrics_embed: bool,
+    /// Suggested tags and covers are on unless this is set (stored inverted so that an old
+    /// save gets them).
+    pub suggest_off: bool,
+    /// ...and other songs are looked up in the background unless this is set.
+    pub suggest_sweep_off: bool,
     /// How loudness is levelled between songs.
     pub loudness: skratch::player::Loudness,
     /// Gapless playback is on unless this is set (stored inverted so an old save gets it).

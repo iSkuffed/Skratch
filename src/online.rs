@@ -195,6 +195,21 @@ pub struct TagMatch {
 /// Looks one track up by artist and title. `seconds` (0 when unknown) is checked against the
 /// recording's length. `Ok(None)` when MusicBrainz has nothing.
 pub fn lookup_tags(artist: &str, title: &str, seconds: f64) -> Result<Option<TagMatch>> {
+    Ok(lookup_all(artist, title, seconds, 1, false)?
+        .into_iter()
+        .next())
+}
+
+/// Up to `most` different answers for one track (best first), for when the first is not the
+/// album the user has in mind. With `studio_only` only official studio releases are offered
+/// (no live albums, compilations, bootlegs or karaoke), which may leave nothing.
+pub fn lookup_all(
+    artist: &str,
+    title: &str,
+    seconds: f64,
+    most: usize,
+    studio_only: bool,
+) -> Result<Vec<TagMatch>> {
     let clean = |text: &str| text.replace(['"', '\\'], " ");
     let mut query = vec![format!("recording:\"{}\"", clean(title.trim()))];
     if !artist.trim().is_empty() {
@@ -205,24 +220,92 @@ pub fn lookup_tags(artist: &str, title: &str, seconds: f64) -> Result<Option<Tag
         &[
             ("query", &query.join(" AND ")),
             ("fmt", "json"),
-            ("limit", "5"),
+            ("limit", "25"),
         ],
     )?;
-    Ok(parse_recordings(&json, seconds))
+    Ok(parse_recordings(&json, seconds, most, studio_only))
 }
 
-fn parse_recordings(json: &Value, seconds: f64) -> Option<TagMatch> {
-    let length_fits = |recording: &Value| {
+/// The answers worth offering, best first: every release of every recording that fits `seconds`
+/// ranked together (official studio albums before compilations and live albums, earlier before
+/// later), never the same album twice. When no recording fits the length, the first one is
+/// offered anyway (it is not `strong`). At most `most` come back.
+fn parse_recordings(json: &Value, seconds: f64, most: usize, studio_only: bool) -> Vec<TagMatch> {
+    let fits = |recording: &Value| {
         seconds < 1.0
             || recording["length"]
                 .as_f64()
                 .is_none_or(|ms| (ms / 1000.0 - seconds).abs() <= 5.0)
     };
-    let recordings = json["recordings"].as_array()?;
-    let recording = recordings
-        .iter()
-        .find(|r| length_fits(r))
-        .or_else(|| recordings.first())?;
+    let Some(recordings) = json["recordings"].as_array() else {
+        return Vec::new();
+    };
+    let mut ordered: Vec<&Value> = recordings.iter().filter(|r| fits(r)).collect();
+    if ordered.is_empty() {
+        ordered.extend(recordings.first());
+    }
+    // (recording, release); a recording on no release is offered with `Value::Null`
+    let mut pairs: Vec<(&Value, &Value)> = Vec::new();
+    for recording in ordered {
+        match recording["releases"].as_array().filter(|r| !r.is_empty()) {
+            Some(releases) => pairs.extend(releases.iter().map(|release| (recording, release))),
+            None => pairs.push((recording, &Value::Null)),
+        }
+    }
+    if studio_only {
+        pairs.retain(|(_, release)| is_studio(release));
+    }
+    // stable, so among equals the better-scored recording stays first
+    pairs.sort_by_key(|(recording, release)| release_rank(recording, release));
+    let mut found: Vec<TagMatch> = Vec::new();
+    for (recording, release) in pairs {
+        let Some(answer) = recording_match(recording, release, fits(recording)) else {
+            continue;
+        };
+        let same = |f: &TagMatch| f.album.eq_ignore_ascii_case(&answer.album);
+        if !found.iter().any(same) {
+            found.push(answer);
+        }
+        if found.len() >= most {
+            break;
+        }
+    }
+    found
+}
+
+/// An official release of a studio album, single or EP.
+fn is_studio(release: &Value) -> bool {
+    let group = &release["release-group"];
+    release["status"].as_str() == Some("Official")
+        && matches!(
+            group["primary-type"].as_str(),
+            Some("Album" | "Single" | "EP")
+        )
+        && group["secondary-types"]
+            .as_array()
+            .is_none_or(|types| types.is_empty())
+}
+
+/// Smaller sorts first: the plain recording (not "live, 1986-07-27: ..."), an official studio
+/// album, then the earliest.
+fn release_rank(recording: &Value, release: &Value) -> (bool, bool, bool, String) {
+    let group = &release["release-group"];
+    let studio = group["primary-type"].as_str() == Some("Album")
+        && group["secondary-types"]
+            .as_array()
+            .is_none_or(|types| types.is_empty());
+    (
+        recording["disambiguation"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        release["status"].as_str() != Some("Official"),
+        !studio,
+        release["date"].as_str().unwrap_or("9999").to_owned(),
+    )
+}
+
+/// `release` is `Value::Null` for a recording that is on no release.
+fn recording_match(recording: &Value, release: &Value, fits: bool) -> Option<TagMatch> {
     let artist: String = recording["artist-credit"]
         .as_array()
         .into_iter()
@@ -235,36 +318,16 @@ fn parse_recordings(json: &Value, seconds: f64) -> Option<TagMatch> {
             )
         })
         .collect();
-    // prefer an official studio album, then the earliest release
-    let release = recording["releases"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .min_by_key(|release| {
-            let group = &release["release-group"];
-            let studio = group["primary-type"].as_str() == Some("Album")
-                && group["secondary-types"]
-                    .as_array()
-                    .is_none_or(|types| types.is_empty());
-            (
-                release["status"].as_str() != Some("Official"),
-                !studio,
-                release["date"].as_str().unwrap_or("9999").to_owned(),
-            )
-        });
-    let date = release.and_then(|r| r["date"].as_str());
+    let date = release["date"].as_str();
     Some(TagMatch {
         artist,
         title: recording["title"].as_str()?.to_owned(),
-        album: release
-            .and_then(|r| r["title"].as_str())
-            .unwrap_or_default()
-            .to_owned(),
+        album: release["title"].as_str().unwrap_or_default().to_owned(),
         year: date.and_then(|d| d.get(..4)).and_then(|y| y.parse().ok()),
-        track_number: release
-            .and_then(|r| r["media"][0]["track"][0]["number"].as_str())
+        track_number: release["media"][0]["track"][0]["number"]
+            .as_str()
             .and_then(|n| n.parse().ok()),
-        strong: recording["score"].as_u64().unwrap_or(0) >= 90 && length_fits(recording),
+        strong: recording["score"].as_u64().unwrap_or(0) >= 90 && fits,
     })
 }
 
@@ -314,13 +377,38 @@ mod tests {
                 {"title": "Studio", "status": "Official", "date": "2019-05-02",
                  "release-group": {"primary-type": "Album"},
                  "media": [{"track": [{"number": "7"}]}]}]}]});
-        let found = parse_recordings(&json, 201.0).unwrap();
+        let found = parse_recordings(&json, 201.0, 1, false).remove(0);
         assert_eq!(found.artist, "A feat. B");
         assert_eq!(found.album, "Studio");
         assert_eq!((found.year, found.track_number), (Some(2019), Some(7)));
         assert!(found.strong);
         // wrong length: still offered, but not strong
-        assert!(!parse_recordings(&json, 50.0).unwrap().strong);
+        assert!(!parse_recordings(&json, 50.0, 1, false)[0].strong);
+    }
+
+    #[test]
+    fn every_release_of_the_recording_is_offered_once_best_first() {
+        let json = json!({"recordings": [
+            {"title": "Song", "score": 100, "length": 200000, "artist-credit": [{"name": "A"}],
+             "releases": [
+                {"title": "Hits", "status": "Official", "date": "2021-01-01",
+                 "release-group": {"primary-type": "Album", "secondary-types": ["Compilation"]}},
+                {"title": "Studio", "status": "Official", "date": "2019-05-02",
+                 "release-group": {"primary-type": "Album"}},
+                {"title": "Studio", "status": "Official", "date": "2019-05-02",
+                 "release-group": {"primary-type": "Album"}},
+                {"title": "Bootleg", "status": "Bootleg", "date": "2000-01-01"}]}]});
+        let albums: Vec<_> = parse_recordings(&json, 200.0, 3, false)
+            .into_iter()
+            .map(|m| m.album)
+            .collect();
+        assert_eq!(albums, ["Studio", "Hits", "Bootleg"]);
+        let studio: Vec<_> = parse_recordings(&json, 200.0, 3, true)
+            .into_iter()
+            .map(|m| m.album)
+            .collect();
+        assert_eq!(studio, ["Studio"]);
+        assert!(parse_recordings(&json!({}), 200.0, 3, false).is_empty());
     }
 
     #[test]

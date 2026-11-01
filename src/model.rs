@@ -24,7 +24,20 @@ pub struct Track {
     /// Stars from 1 to 5; 0 means not rated.
     #[serde(default)]
     pub rating: u8,
+    /// What was decided about online suggestions for it: one of the `SUGGEST_*` values.
+    #[serde(default)]
+    pub suggest: u8,
+    /// When that was decided, in seconds since the Unix epoch.
+    #[serde(default)]
+    pub suggest_at: Option<i64>,
 }
+
+/// `Track::suggest`: nothing was found online (asked again after a while).
+pub const SUGGEST_NOTHING: u8 = 1;
+/// ...the user took a suggestion (all or part of it).
+pub const SUGGEST_APPLIED: u8 = 2;
+/// ...the user said never to suggest anything for it.
+pub const SUGGEST_NEVER: u8 = 3;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MetadataEdit {

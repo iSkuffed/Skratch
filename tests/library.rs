@@ -501,3 +501,47 @@ fn unfinished_editing_copies_are_not_songs() {
     // a recent copy might still be in use, so it stays
     assert!(copy.exists());
 }
+
+#[test]
+fn suggestion_answers_are_kept_and_an_older_database_gains_the_columns() {
+    use skratch::model::{SUGGEST_APPLIED, SUGGEST_NEVER};
+    let temp = tempdir().unwrap();
+    let data = temp.path().join("data");
+    let music = temp.path().join("music");
+    fs::create_dir_all(&music).unwrap();
+    write_wav(&music.join("song.wav"));
+
+    let mut library = Library::open(&data).unwrap();
+    library.add_source(&music).unwrap();
+    library.scan(false).unwrap();
+    let id = library.tracks().unwrap()[0].id;
+    assert_eq!(library.tracks().unwrap()[0].suggest, 0);
+    library.set_suggest(&[id], SUGGEST_APPLIED, 5_000).unwrap();
+    library.rate(&[id], 3).unwrap();
+    library.set_suggest(&[id], SUGGEST_NEVER, 6_000).unwrap();
+    library.scan(true).unwrap();
+    drop(library);
+
+    // a library made before the answers were kept: the table lacks the columns
+    let old = rusqlite::Connection::open(data.join("library.sqlite3")).unwrap();
+    old.execute_batch(
+        "ALTER TABLE track_stats DROP COLUMN suggest; ALTER TABLE track_stats DROP COLUMN suggest_at;",
+    )
+    .unwrap();
+    drop(old);
+    let library = Library::open(&data).unwrap();
+    let track = &library.tracks().unwrap()[0];
+    assert_eq!(
+        (track.suggest, track.suggest_at, track.rating),
+        (0, None, 3)
+    );
+    drop(library);
+
+    let mut library = Library::open(&data).unwrap();
+    library.set_suggest(&[id], SUGGEST_NEVER, 7_000).unwrap();
+    let track = &library.tracks().unwrap()[0];
+    assert_eq!(
+        (track.suggest, track.suggest_at),
+        (SUGGEST_NEVER, Some(7_000))
+    );
+}

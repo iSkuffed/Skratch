@@ -128,6 +128,20 @@ impl Library {
              );",
             )
             .context("initialize music library database")?;
+        // added later: what was decided about online suggestions for the track
+        let has_suggest: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('track_stats') WHERE name = 'suggest'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_suggest == 0 {
+            connection
+                .execute_batch(
+                    "ALTER TABLE track_stats ADD COLUMN suggest INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE track_stats ADD COLUMN suggest_at INTEGER;",
+                )
+                .context("add suggestion columns")?;
+        }
 
         Ok(Self {
             connection,
@@ -185,7 +199,8 @@ impl Library {
         let mut statement = self.connection.prepare(
             "SELECT id, path, title, artist, album, album_artist, genre, year,
                     track_number, disc_number, duration, artwork,
-                    COALESCE(plays, 0), last_played, COALESCE(rating, 0)
+                    COALESCE(plays, 0), last_played, COALESCE(rating, 0),
+                    COALESCE(suggest, 0), suggest_at
              FROM tracks LEFT JOIN track_stats ON track_id = id
              ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE,
                       disc_number, track_number, title COLLATE NOCASE, path",
@@ -214,6 +229,21 @@ impl Library {
                 "INSERT INTO track_stats(track_id, rating) VALUES (?1, ?2)
                  ON CONFLICT(track_id) DO UPDATE SET rating = ?2",
                 params![id, i64::from(stars.min(5))],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Notes what was decided about online suggestions for these tracks (a `SUGGEST_*` value)
+    /// and when.
+    pub fn set_suggest(&mut self, ids: &[i64], state: u8, when: i64) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        for id in ids {
+            transaction.execute(
+                "INSERT INTO track_stats(track_id, suggest, suggest_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(track_id) DO UPDATE SET suggest = ?2, suggest_at = ?3",
+                params![id, i64::from(state), when],
             )?;
         }
         transaction.commit()?;
@@ -781,6 +811,8 @@ fn track_from_row(row: &Row<'_>) -> rusqlite::Result<Track> {
         plays: row.get::<_, i64>(12)?.try_into().unwrap_or(0),
         last_played: row.get(13)?,
         rating: row.get::<_, i64>(14)?.clamp(0, 5) as u8,
+        suggest: row.get::<_, i64>(15)?.clamp(0, 255) as u8,
+        suggest_at: row.get(16)?,
     })
 }
 
@@ -789,7 +821,8 @@ fn track_by_id(connection: &Connection, id: i64) -> Result<Track> {
         .query_row(
             "SELECT id, path, title, artist, album, album_artist, genre, year,
                     track_number, disc_number, duration, artwork,
-                    COALESCE(plays, 0), last_played, COALESCE(rating, 0)
+                    COALESCE(plays, 0), last_played, COALESCE(rating, 0),
+                    COALESCE(suggest, 0), suggest_at
              FROM tracks LEFT JOIN track_stats ON track_id = id WHERE id = ?1",
             [id],
             track_from_row,

@@ -28,6 +28,7 @@ fn fingerprint(sources: &[PathBuf], tracks: &[Track]) -> u64 {
             (&t.title, &t.artist, &t.album, &t.album_artist, &t.genre),
             (t.year, t.track_number, t.disc_number, t.duration.to_bits()),
             (&t.artwork, t.plays, t.last_played, t.rating),
+            (t.suggest, t.suggest_at),
         )
             .hash(&mut hasher);
     }
@@ -48,6 +49,8 @@ pub enum Command {
     Played(i64, i64),
     /// Stars (0 clears) for these tracks.
     Rate(Vec<i64>, u8),
+    /// What was decided about suggestions for these tracks (`model::SUGGEST_*`) and when.
+    Suggested(Vec<i64>, u8, i64),
 }
 
 pub enum Event {
@@ -179,7 +182,10 @@ impl Service {
                 match rx.recv_timeout(Duration::from_millis(250)) {
                     Ok(command) => {
                         // Play counts and ratings change nothing on disk, so no rescan.
-                        let quiet = matches!(command, Command::Played(..) | Command::Rate(..));
+                        let quiet = matches!(
+                            command,
+                            Command::Played(..) | Command::Rate(..) | Command::Suggested(..)
+                        );
                         // A panic inside a command (a tag or image library choking on one
                         // odd file) must not kill the worker for the rest of the session.
                         let result = catch_unwind(AssertUnwindSafe(|| match command {
@@ -190,6 +196,9 @@ impl Service {
                             Command::Rescan => Ok(()),
                             Command::Played(id, when) => library.record_play(id, when),
                             Command::Rate(ids, stars) => library.rate(&ids, stars),
+                            Command::Suggested(ids, state, when) => {
+                                library.set_suggest(&ids, state, when)
+                            }
                             Command::Add(path) => library.add_source(&path),
                             Command::Remove(path) => library.remove_source(&path),
                             Command::Edit(id, edit) => {

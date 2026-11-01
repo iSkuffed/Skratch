@@ -141,7 +141,7 @@ pub fn fade_gain(seconds: u8, position: f64, duration: f64) -> f64 {
         .clamp(0.0, 1.0)
 }
 
-fn now_secs() -> i64 {
+pub(super) fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)

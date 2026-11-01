@@ -4,7 +4,7 @@ use super::{Skratch, display};
 use crate::service::Command;
 use eframe::egui::{self, RichText};
 use skratch::{
-    model::{MetadataEdit, Track},
+    model::MetadataEdit,
     online::{self, TagMatch},
     tagparse,
 };
@@ -43,25 +43,7 @@ impl Drop for TagFetch {
     }
 }
 
-/// `track` with the match filled in: empty fields only, or everything with `replace`.
-fn proposed(track: &Track, found: &TagMatch, replace: bool) -> MetadataEdit {
-    let mut edit = MetadataEdit::from(track);
-    let fill = |current: &mut String, new: &str| {
-        if !new.is_empty() && (replace || current.trim().is_empty()) {
-            *current = new.to_owned();
-        }
-    };
-    fill(&mut edit.artist, &found.artist);
-    fill(&mut edit.title, &found.title);
-    fill(&mut edit.album, &found.album);
-    if found.year.is_some() && (replace || edit.year.is_none()) {
-        edit.year = found.year;
-    }
-    if found.track_number.is_some() && (replace || edit.track_number.is_none()) {
-        edit.track_number = found.track_number;
-    }
-    edit
-}
+use skratch::suggest::fill as proposed;
 
 impl Skratch {
     pub(super) fn open_fetch(&mut self) {
