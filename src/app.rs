@@ -244,6 +244,9 @@ pub struct Skratch {
     download_status: String,
     download_log: std::collections::VecDeque<String>,
     select_mode: bool,
+    /// The ticked songs belong to a dialog opened from a menu (select mode itself is off): they
+    /// are let go once it closes.
+    dialog_picks: bool,
     selected: HashSet<i64>,
     /// The row last clicked, where a shift-click range starts.
     anchor: Option<i64>,
@@ -389,6 +392,7 @@ impl Skratch {
             last_save: Instant::now(),
             last_desktop: Instant::now(),
             select_mode: false,
+            dialog_picks: false,
             selected: HashSet::new(),
             anchor: None,
             visible: Vec::new(),
@@ -1848,7 +1852,8 @@ impl Skratch {
         // the dialogs below work on the selection, so make it exactly these tracks
         let select = |this: &mut Self| {
             this.selected = ids.iter().copied().collect();
-            this.select_mode = true;
+            // select mode is only ever turned on by the user
+            this.dialog_picks = !this.select_mode;
         };
         let mut done = false;
         if ids.len() == 1
@@ -2868,6 +2873,12 @@ impl eframe::App for Skratch {
         self.poll(ctx);
         self.poll_setup();
         self.poll_pick();
+        if self.dialog_picks && self.fetch.is_none() && !self.fill_open && self.pick_rx.is_none() {
+            self.dialog_picks = false;
+            if !self.select_mode {
+                self.selected.clear();
+            }
+        }
         self.visible.clear();
         // keys are for this window only; whatever else has focus (a game, say) keeps its own
         let focused = ctx.input(|i| i.focused);
