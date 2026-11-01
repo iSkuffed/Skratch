@@ -28,6 +28,10 @@ fn fingerprint(sources: &[PathBuf], tracks: &[Track]) -> u64 {
             (&t.title, &t.artist, &t.album, &t.album_artist, &t.genre),
             (t.year, t.track_number, t.disc_number, t.duration.to_bits()),
             (&t.artwork, t.plays, t.last_played, t.rating),
+            // a new cover is written over the old file, so its date is what tells them apart
+            t.artwork
+                .as_ref()
+                .and_then(|path| path.metadata().and_then(|meta| meta.modified()).ok()),
             (t.suggest, t.suggest_at),
         )
             .hash(&mut hasher);
@@ -341,6 +345,23 @@ mod tests {
         file.write_all(b"data").unwrap();
         file.write_all(&(pcm.len() as u32).to_le_bytes()).unwrap();
         file.write_all(&pcm).unwrap();
+    }
+
+    #[test]
+    fn a_cover_written_over_the_old_one_changes_the_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let art = dir.path().join("1.png");
+        fs::write(&art, b"old").unwrap();
+        let track = Track {
+            id: 1,
+            artwork: Some(art.clone()),
+            ..Track::default()
+        };
+        let before = fingerprint(&[], std::slice::from_ref(&track));
+        let file = fs::File::options().write(true).open(&art).unwrap();
+        file.set_modified(std::time::SystemTime::now() + Duration::from_secs(5))
+            .unwrap();
+        assert_ne!(before, fingerprint(&[], &[track]));
     }
 
     fn wait_count(service: &Service, count: usize) {
