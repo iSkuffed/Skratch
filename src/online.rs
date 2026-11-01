@@ -446,7 +446,10 @@ mod tests {
         ]});
         let found = parse_deezer(&json);
         assert_eq!(found.len(), 1);
-        assert_eq!((found[0].label.as_str(), found[0].source.as_str()), ("A - B", "Deezer"));
+        assert_eq!(
+            (found[0].label.as_str(), found[0].source.as_str()),
+            ("A - B", "Deezer")
+        );
         assert_eq!(found[0].full, "https://x/1000.jpg");
     }
 

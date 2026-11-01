@@ -286,6 +286,10 @@ pub struct Skratch {
     reactive: Reactive,
     viz: visualizer::Viz,
     lyrics: lyrics::Lookup,
+    /// The lyric line that was being sung when the logo last checked it, and when it started
+    /// scratching (egui time) after a line that says "scratch".
+    scratch_line: Option<usize>,
+    scratch_at: Option<f64>,
     /// The track the Now playing list was last scrolled to, so it follows track changes.
     listed: Option<i64>,
     /// Until this time (egui seconds) a track change counts as caused by a click in that list.
@@ -422,6 +426,8 @@ impl Skratch {
             reactive: Reactive::default(),
             viz: Default::default(),
             lyrics: lyrics::Lookup::default(),
+            scratch_line: None,
+            scratch_at: None,
             listed: None,
             list_hold: 0.0,
             panel_shown: None,
@@ -1327,6 +1333,9 @@ impl Skratch {
     }
 
     fn title_bar(&mut self, ui: &mut egui::Ui, radius: u8) {
+        let scratch = self
+            .scratch_at
+            .map(|at| (ui.input(|i| i.time) - at) as f32 / style::SCRATCH_SECS);
         let now = self
             .current()
             .map(|t| format!("{}  -  {}", t.title, display(&t.artist, "Unknown artist")))
@@ -1342,7 +1351,9 @@ impl Skratch {
         egui::TopBottomPanel::top("titlebar")
             .exact_height(44.0)
             .frame(frame)
-            .show_inside(ui, |ui| style::title_bar(ui, &self.logo, self.accent, &now));
+            .show_inside(ui, |ui| {
+                style::title_bar(ui, &self.logo, self.accent, &now, scratch)
+            });
     }
 
     /// How far the new cover has faded in (0 to 1), and the previous cover's texture and backdrop
@@ -2926,6 +2937,7 @@ impl eframe::App for Skratch {
                 return;
             }
             let outline = ui.max_rect();
+            self.scratch_logo(ui.ctx());
             self.title_bar(ui, radius);
             if let Some(text) = self.messages.last().cloned() {
                 // floats over the page, so it never pushes the layout around

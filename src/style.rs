@@ -649,11 +649,51 @@ pub fn groove_seek(
     }
 }
 
-fn wordmark(p: &Painter, left_center: Pos2, accent: Color32) {
-    let galley = p.layout_no_wrap("SKRATCH".into(), display(22.0), accent);
-    let rect = Align2::LEFT_CENTER.anchor_size(left_center, galley.size());
+/// How long the logo's scratch show lasts.
+pub const SCRATCH_SECS: f32 = 1.6;
+
+/// The record being scrubbed back and forth, easing out: -1 to 1.
+fn wicka(t: f32) -> f32 {
+    (t * std::f32::consts::TAU * 3.5).sin() * (1.0 - t).powi(2)
+}
+
+fn wordmark(p: &Painter, left_center: Pos2, accent: Color32, scratch: Option<f32>) {
+    let t = scratch.map(|t| t.clamp(0.0, 1.0));
+    // the word shakes with the record and flashes white as the needle goes through
+    let shake = t.map_or(0.0, |t| wicka(t) * 3.5);
+    let flash = t.map_or(0.0, |t| (1.0 - t).powi(2) * 0.6);
+    let colour = accent.lerp_to_gamma(Color32::WHITE, flash);
+    let galley = p.layout_no_wrap("SKRATCH".into(), display(22.0), colour);
+    let rect = Align2::LEFT_CENTER.anchor_size(left_center + Vec2::new(shake, 0.0), galley.size());
     for dx in [0.0, 0.6, 1.2] {
-        p.galley(rect.min + Vec2::new(dx, 0.0), galley.clone(), accent);
+        p.galley(rect.min + Vec2::new(dx, 0.0), galley.clone(), colour);
+    }
+    // a needle sweeps through the word, leaving fresh scratches that fade
+    if let Some(t) = t {
+        let sweep = (t / 0.4).min(1.0);
+        let fade = 1.0 - ((t - 0.4) / 0.6).clamp(0.0, 1.0);
+        for from in [0.08, 0.2, 0.46, 0.55, 0.78, 0.9] {
+            if sweep < from {
+                continue;
+            }
+            let a = Pos2::new(rect.left() + rect.width() * from, rect.bottom() + 4.0);
+            let b = a + Vec2::new(rect.width() * 0.07, -rect.height() - 8.0);
+            p.line_segment([a, b], stroke(1.6, TITLE.gamma_multiply(fade)));
+            p.line_segment(
+                [a + Vec2::new(1.5, 0.0), b + Vec2::new(1.5, 0.0)],
+                stroke(0.8, Color32::WHITE.gamma_multiply(fade * 0.8)),
+            );
+        }
+        if sweep < 1.0 {
+            let x = rect.left() + rect.width() * sweep;
+            p.line_segment(
+                [
+                    Pos2::new(x, rect.bottom() + 5.0),
+                    Pos2::new(x + 7.0, rect.top() - 5.0),
+                ],
+                stroke(2.4, Color32::WHITE),
+            );
+        }
     }
     // two scratches cut across the letters, the way a needle would
     for (from, to) in [(0.26, 0.36), (0.63, 0.7)] {
@@ -670,7 +710,15 @@ fn wordmark(p: &Painter, left_center: Pos2, accent: Color32) {
 }
 
 /// The window's own title bar: drag to move, double-click to maximise, and the three buttons.
-pub fn title_bar(ui: &mut Ui, logo: &egui::TextureHandle, accent: Color32, now: &str) {
+///
+/// `scratch` is how far (0 to 1) the logo's scratch show has got, if one is running.
+pub fn title_bar(
+    ui: &mut Ui,
+    logo: &egui::TextureHandle,
+    accent: Color32,
+    now: &str,
+    scratch: Option<f32>,
+) {
     let ctx = ui.ctx().clone();
     let rect = ui.max_rect();
     let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
@@ -690,7 +738,12 @@ pub fn title_bar(ui: &mut Ui, logo: &egui::TextureHandle, accent: Color32, now: 
         Pos2::new(rect.left() + 32.0, rect.center().y),
         logo.size_vec2() * (30.0 / logo.size_vec2().y),
     );
-    egui::Image::new(logo).tint(accent).paint_at(ui, mark);
+    // the mark rocks like a record under a hand
+    let angle = scratch.map_or(0.0, |t| wicka(t.clamp(0.0, 1.0)) * 0.5);
+    egui::Image::new(logo)
+        .tint(accent)
+        .rotate(angle, Vec2::splat(0.5))
+        .paint_at(ui, mark);
     let link = ui
         .interact(mark.expand(4.0), ui.id().with("logo"), Sense::click())
         .on_hover_cursor(CursorIcon::PointingHand)
@@ -699,7 +752,12 @@ pub fn title_bar(ui: &mut Ui, logo: &egui::TextureHandle, accent: Color32, now: 
         // Linux-only app; xdg-open hands the link to the default browser
         let _ = std::process::Command::new("xdg-open").arg(HOME_URL).spawn();
     }
-    wordmark(&p, Pos2::new(mark.right() + 12.0, rect.center().y), accent);
+    wordmark(
+        &p,
+        Pos2::new(mark.right() + 12.0, rect.center().y),
+        accent,
+        scratch,
+    );
     if !now.is_empty() {
         p.text(
             rect.center(),

@@ -244,6 +244,12 @@ fn lrclib(track: &Track, skip: &[String]) -> Result<Option<Lyrics>> {
     Ok(pick(&found, track.duration, skip))
 }
 
+/// Whether a lyric line says scratch, scratching, Skratch... (for the logo's little show).
+pub fn mentions_scratch(line: &str) -> bool {
+    let line = line.to_lowercase();
+    line.contains("scratch") || line.contains("skratch")
+}
+
 /// A song title reduced to what names the song: no filler, no (bracketed) parts, no
 /// punctuation or case.
 fn plain_title(title: &str) -> String {
@@ -1211,6 +1217,14 @@ mod tests {
             find(&track, &dir.path().join("cache"), Online::default()).lyrics,
             Some(Lyrics::Synced(vec![(5.0, "hello".into())]))
         );
+    }
+
+    #[test]
+    fn the_logo_hears_scratch_and_skratch() {
+        assert!(mentions_scratch("Scratch my problems away"));
+        assert!(mentions_scratch("Turntables, scratchin' all night"));
+        assert!(mentions_scratch("this is SKRATCH"));
+        assert!(!mentions_scratch("Scrap the plan, catch a flight"));
     }
 
     #[test]

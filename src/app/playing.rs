@@ -1071,6 +1071,10 @@ impl Skratch {
         ui.checkbox(&mut style.sweep, "Fill the sung line as it goes");
         ui.checkbox(&mut style.shadow, "Soft shadow behind the text");
         ui.checkbox(&mut style.source, "Say where the lyrics came from");
+        ui.checkbox(
+            &mut style.logo_scratch,
+            "Logo scratches when a line says \"scratch\"",
+        );
         ui.horizontal_wrapped(|ui| {
             ui.label("Rhymes");
             for (shown, name) in [
@@ -1228,6 +1232,39 @@ impl Skratch {
             self.save_lyrics(&dir, track, &text);
         } else if !cancel {
             self.lyrics.editing = Some(text);
+        }
+    }
+
+    /// The logo's little show: when the line being sung says "scratch" (or "Skratch"), the logo
+    /// scrubs like a record for a moment. Only synced lyrics that are loaded can start it.
+    pub(super) fn scratch_logo(&mut self, ctx: &egui::Context) {
+        let time = ctx.input(|i| i.time);
+        if let Some(at) = self.scratch_at {
+            if time - at > f64::from(style::SCRATCH_SECS) {
+                self.scratch_at = None;
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        let line = match &self.lyrics.status {
+            Status::Found(Lyrics::Synced(lines))
+                if self.playing && self.state.lyric_style.logo_scratch =>
+            {
+                let now = self.reactive.now();
+                lines
+                    .partition_point(|(t, _)| *t <= now)
+                    .checked_sub(1)
+                    .map(|i| (i, lyrics::mentions_scratch(&lines[i].1)))
+            }
+            _ => None,
+        };
+        let index = line.map(|(i, _)| i);
+        if index != self.scratch_line {
+            self.scratch_line = index;
+            if line.is_some_and(|(_, hit)| hit) {
+                self.scratch_at = Some(time);
+                ctx.request_repaint();
+            }
         }
     }
 

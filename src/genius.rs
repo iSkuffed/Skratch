@@ -50,7 +50,8 @@ fn album_covers(results: &Value, artist: &str) -> Vec<(String, String)> {
             );
             let by_plain = plain(by);
             let fits = want.is_empty() || by_plain.contains(&want) || want.contains(&by_plain);
-            (fits && cover.starts_with("https://")).then(|| (format!("{by} - {name}"), cover.to_owned()))
+            (fits && cover.starts_with("https://"))
+                .then(|| (format!("{by} - {name}"), cover.to_owned()))
         })
         .collect()
 }
@@ -223,9 +224,7 @@ mod tests {
 
     #[test]
     fn album_hits_give_covers_for_the_artist_asked_about() {
-        let hit = |name: &str, by: &str, cover: &str| {
-            json!({"type": "album", "result": {"name": name, "artist": {"name": by}, "cover_art_url": cover}})
-        };
+        let hit = |name: &str, by: &str, cover: &str| json!({"type": "album", "result": {"name": name, "artist": {"name": by}, "cover_art_url": cover}});
         let results = json!({"response": {"sections": [
             {"type": "song", "hits": [{"type": "song", "result": {"title": "x"}}]},
             {"type": "album", "hits": [
@@ -236,7 +235,10 @@ mod tests {
         ]}});
         assert_eq!(
             album_covers(&results, "the band"),
-            [("The Band - Blue".to_string(), "https://images.example/a.1000x1000x1.jpg".to_string())]
+            [(
+                "The Band - Blue".to_string(),
+                "https://images.example/a.1000x1000x1.jpg".to_string()
+            )]
         );
         assert_eq!(album_covers(&results, "").len(), 2);
     }

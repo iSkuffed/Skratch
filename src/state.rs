@@ -182,6 +182,8 @@ pub struct LyricStyle {
     pub shadow: bool,
     /// A small "from LRCLIB" line under the lyrics, saying where they came from.
     pub source: bool,
+    /// The logo scrubs like a record when the line being sung says "scratch" or "Skratch".
+    pub logo_scratch: bool,
 }
 
 impl Default for LyricStyle {
@@ -196,6 +198,7 @@ impl Default for LyricStyle {
             sweep: true,
             shadow: true,
             source: true,
+            logo_scratch: true,
         }
     }
 }

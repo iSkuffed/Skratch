@@ -383,11 +383,9 @@ pub fn mark_verse(lines: &[&str]) -> Vec<Vec<Mark>> {
             if STOP.contains(&t.text.as_str()) {
                 // "in", "me", "it" only count as a multi-phoneme line ending, or as a line
                 // ending that other nearby lines end on too ("... I sing to her", "... I stroke her").
-                let echoed = |o: usize| {
-                    ends[o].is_some_and(|w| same_word(w, &t.text))
-                };
-                let repeated = (li.saturating_sub(3)..(li + 4).min(lines.len()))
-                    .any(|o| o != li && echoed(o));
+                let echoed = |o: usize| ends[o].is_some_and(|w| same_word(w, &t.text));
+                let repeated =
+                    (li.saturating_sub(3)..(li + 4).min(lines.len())).any(|o| o != li && echoed(o));
                 if !is_end || (phonemes < 2 && !repeated) {
                     continue;
                 }
