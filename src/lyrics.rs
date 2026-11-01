@@ -816,6 +816,8 @@ pub struct Lookup {
     tx: Sender<(PathBuf, bool, Answer)>,
     rx: Receiver<(PathBuf, bool, Answer)>,
     track: Option<PathBuf>,
+    /// The artist the lookup was made with; a fixed tag asks again.
+    artist: String,
     /// Whether the answer in `status` already included the online lookup.
     asked_online: bool,
     pub status: Status,
@@ -854,6 +856,7 @@ impl Default for Lookup {
             tx,
             rx,
             track: None,
+            artist: String::new(),
             asked_online: false,
             status: Status::Loading,
             origin: None,
@@ -872,11 +875,13 @@ impl Lookup {
     /// Starts a lookup for `track` if it changed (or `online` was just allowed and the first
     /// answer was "nothing"), and collects a finished one into `status`.
     pub fn update(&mut self, ctx: &egui::Context, track: &Track, dir: &Path, online: Online) {
-        let changed = self.track.as_deref() != Some(track.path.as_path());
+        let changed =
+            self.track.as_deref() != Some(track.path.as_path()) || self.artist != track.artist;
         let allowed_now =
             online.allowed && !self.asked_online && matches!(self.status, Status::Missing);
         if changed || allowed_now {
             self.track = Some(track.path.clone());
+            self.artist.clone_from(&track.artist);
             self.asked_online = online.allowed;
             self.other_state = OtherState::Idle;
             self.status = Status::Loading;

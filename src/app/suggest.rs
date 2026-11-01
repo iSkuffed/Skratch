@@ -76,6 +76,8 @@ pub struct Suggest {
     /// Whether answers from an earlier run were checked against the library.
     pruned: bool,
     in_flight: usize,
+    /// Songs whose lookup has been sent and not answered yet.
+    pending: HashSet<i64>,
     failures: u32,
     /// After the services failed to answer, nothing is asked until then.
     pause_until: Option<Instant>,
@@ -112,6 +114,7 @@ impl Suggest {
             just_applied: None,
             pruned: false,
             in_flight: 0,
+            pending: HashSet::new(),
             failures: 0,
             pause_until: None,
             last_sweep: Instant::now(),
@@ -122,6 +125,11 @@ impl Suggest {
 
     fn paused(&self) -> bool {
         self.pause_until.is_some_and(|until| Instant::now() < until)
+    }
+
+    /// Whether this song is being looked up right now.
+    pub fn pending(&self, id: i64) -> bool {
+        self.pending.contains(&id)
     }
 
     /// How many songs have fixes waiting.
@@ -181,6 +189,7 @@ impl Skratch {
             match done {
                 Done::Found(id, answer) => {
                     self.suggest.in_flight = self.suggest.in_flight.saturating_sub(1);
+                    self.suggest.pending.remove(&id);
                     match answer {
                         Ok(choices) => {
                             self.suggest.failures = 0;
@@ -257,6 +266,7 @@ impl Skratch {
 
     fn look_up(&mut self, track: Track) {
         self.suggest.asked.insert(track.id);
+        self.suggest.pending.insert(track.id);
         self.suggest.in_flight += 1;
         let _ = self.suggest.jobs.send(track);
     }

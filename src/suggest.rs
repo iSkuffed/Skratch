@@ -87,8 +87,40 @@ impl Choice {
             };
             now != change.to
         };
-        self.changes.iter().any(differs) || (self.cover.is_some() && track.artwork.is_none())
+        self.changes.iter().any(differs)
+            || (self.cover.is_some()
+                && track.artwork.is_none()
+                && (!self.changes.is_empty() || trusted_album(track)))
     }
+}
+
+/// Whether the song's own album tag can be believed enough to look a cover up by it: not a
+/// placeholder like "Unreleased" or "Unknown", and filled in on purpose (a year or a track
+/// number came with it). Otherwise tags are fixed first, and the cover follows from them.
+pub fn trusted_album(track: &Track) -> bool {
+    let plain: String = track
+        .album
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    const PLACEHOLDERS: [&str; 12] = [
+        "unreleased",
+        "unknown",
+        "unknownalbum",
+        "single",
+        "singles",
+        "misc",
+        "miscellaneous",
+        "various",
+        "other",
+        "untitled",
+        "none",
+        "na",
+    ];
+    !plain.is_empty()
+        && !PLACEHOLDERS.contains(&plain.as_str())
+        && (track.year.is_some() || track.track_number.is_some())
 }
 
 /// A suggestion the user took, kept so it can be undone.
@@ -311,7 +343,7 @@ pub fn find(track: &Track) -> Result<Vec<Choice>> {
         });
     }
     // no tags to add, but a cover is missing: offer one for the album the song already has
-    if choices.is_empty() && want_cover && !track.album.is_empty() {
+    if choices.is_empty() && want_cover && trusted_album(track) {
         std::thread::sleep(PAUSE);
         if let Some(cover) = patient(|| online::search(&track.artist, &track.album))
             .ok()
@@ -527,5 +559,30 @@ mod tests {
         assert_eq!(loaded.waiting[&9][0].changes.len(), 3);
         assert_eq!(loaded.applied[0].label, "Band - Song");
         assert!(Store::load(&dir.path().join("nothing")).waiting.is_empty());
+    }
+
+    #[test]
+    fn a_cover_is_not_searched_by_a_placeholder_or_unchecked_album() {
+        let mut track = song();
+        track.album = "Unreleased".into();
+        track.year = Some(2020);
+        assert!(!trusted_album(&track), "placeholder");
+        track.album = "Real Album".into();
+        track.year = None;
+        assert!(!trusted_album(&track), "nothing else is filled in");
+        track.track_number = Some(3);
+        assert!(trusted_album(&track));
+        let cover_only = Choice {
+            changes: Vec::new(),
+            cover: Some(Candidate {
+                label: "x".into(),
+                source: "iTunes".into(),
+                thumb: String::new(),
+                full: String::new(),
+            }),
+            thumb: None,
+        };
+        track.album = "Unreleased".into();
+        assert!(!cover_only.useful_for(&track), "a kept card is dropped too");
     }
 }

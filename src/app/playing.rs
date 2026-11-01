@@ -646,8 +646,14 @@ impl Skratch {
     /// over it. Either can be switched off from the tab's options; nothing else tells them apart.
     fn stage(&mut self, ui: &mut egui::Ui, track: &Track, area: Rect) {
         let dir = self.data_dir.join("lyrics");
-        self.lyrics
-            .update(ui.ctx(), track, &dir, self.state.lyric_sources());
+        // a song with no artist waits for its tag lookup (a few seconds): lyrics are found by artist
+        let mut online = self.state.lyric_sources();
+        if track.artist.trim().is_empty() && self.suggest.pending(track.id) {
+            online.allowed = false;
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs(1));
+        }
+        self.lyrics.update(ui.ctx(), track, &dir, online);
         let cfg = &self.state.visualizer;
         let editing = self.lyrics.editing.is_some();
         let words = cfg.lyrics || editing;
