@@ -421,6 +421,29 @@ fn embedding_a_cover_writes_it_into_the_file_and_keeps_the_tags() {
             .to_string_lossy()
             .starts_with(".skratch-edit-")
     }));
+
+    // taking the covers out again (undoing a suggestion) leaves the tags and the scan agrees
+    for track in &tracks {
+        library.remove_cover(track.id).unwrap();
+        let tagged = read_from_path(&track.path).unwrap();
+        assert!(
+            tagged.primary_tag().unwrap().pictures().is_empty(),
+            "cover left in {}",
+            track.path.display()
+        );
+        assert_eq!(
+            tagged.primary_tag().unwrap().title().as_deref(),
+            Some("Keep Me")
+        );
+    }
+    library.scan(false).unwrap();
+    assert!(
+        library
+            .tracks()
+            .unwrap()
+            .iter()
+            .all(|t| t.artwork.is_none() && t.title == "Keep Me")
+    );
 }
 
 #[test]
@@ -544,4 +567,53 @@ fn suggestion_answers_are_kept_and_an_older_database_gains_the_columns() {
         (track.suggest, track.suggest_at),
         (SUGGEST_NEVER, Some(7_000))
     );
+}
+
+#[test]
+fn excluded_songs_stay_out_of_scans_and_deleted_ones_leave_the_disk() {
+    let temp = tempdir().unwrap();
+    let data = temp.path().join("data");
+    let music = temp.path().join("music");
+    fs::create_dir_all(&music).unwrap();
+    write_wav(&music.join("keep.wav"));
+    write_wav(&music.join("hide.wav"));
+    write_wav(&music.join("gone.wav"));
+
+    let mut library = Library::open(&data).unwrap();
+    library.add_source(&music).unwrap();
+    library.scan(false).unwrap();
+    let id = |library: &Library, name: &str| {
+        library
+            .tracks()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.path.ends_with(name))
+            .map(|t| t.id)
+    };
+    let (hide, gone) = (
+        id(&library, "hide.wav").unwrap(),
+        id(&library, "gone.wav").unwrap(),
+    );
+
+    library.exclude(&[hide]).unwrap();
+    assert!(music.join("hide.wav").exists(), "excluding keeps the file");
+    library.scan(true).unwrap();
+    assert_eq!(
+        id(&library, "hide.wav"),
+        None,
+        "a scan does not bring it back"
+    );
+    assert_eq!(library.excluded().unwrap().len(), 1);
+
+    let (count, failed) = library.delete_files(&[gone]).unwrap();
+    assert_eq!((count, failed.len()), (1, 0));
+    assert!(!music.join("gone.wav").exists());
+    library.scan(true).unwrap();
+    assert_eq!(library.tracks().unwrap().len(), 1);
+
+    let hidden = library.excluded().unwrap();
+    library.include_again(&hidden).unwrap();
+    library.scan(true).unwrap();
+    assert_eq!(library.tracks().unwrap().len(), 2);
+    assert!(library.excluded().unwrap().is_empty());
 }

@@ -51,6 +51,14 @@ pub enum Command {
     Rate(Vec<i64>, u8),
     /// What was decided about suggestions for these tracks (`model::SUGGEST_*`) and when.
     Suggested(Vec<i64>, u8, i64),
+    /// Takes these tracks out of Skratch (the files stay on the disk).
+    Exclude(Vec<i64>),
+    /// Deletes these tracks' files from the disk, for good.
+    Delete(Vec<i64>),
+    /// Lets these excluded files back into Skratch.
+    Include(Vec<PathBuf>),
+    /// Takes the cover out of these tracks' files (undoing an applied suggestion).
+    RemoveCover(Vec<i64>),
 }
 
 pub enum Event {
@@ -59,6 +67,12 @@ pub enum Event {
     Message(String),
     Edited(i64),
     EditFailed(i64, String),
+    /// The files taken out of Skratch.
+    Excluded(Vec<PathBuf>),
+}
+
+fn plural(count: usize, noun: &str) -> String {
+    format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
 }
 
 fn panicked(panic: Box<dyn Any + Send>) -> anyhow::Error {
@@ -136,6 +150,9 @@ impl Service {
             if let (Ok(sources), Ok(tracks)) = (library.sources(), library.tracks()) {
                 send_snapshot(sources, tracks);
             }
+            if let Ok(list) = library.excluded() {
+                send(Event::Excluded(list));
+            }
             loop {
                 if rescan {
                     send(Event::Busy(true));
@@ -198,6 +215,36 @@ impl Service {
                             Command::Rate(ids, stars) => library.rate(&ids, stars),
                             Command::Suggested(ids, state, when) => {
                                 library.set_suggest(&ids, state, when)
+                            }
+                            Command::Exclude(ids) => {
+                                library.exclude(&ids)?;
+                                send(Event::Excluded(library.excluded()?));
+                                send(Event::Message(format!(
+                                    "Took {} out of Skratch; the files are untouched.",
+                                    plural(ids.len(), "song")
+                                )));
+                                Ok(())
+                            }
+                            Command::Include(paths) => {
+                                library.include_again(&paths)?;
+                                send(Event::Excluded(library.excluded()?));
+                                Ok(())
+                            }
+                            Command::Delete(ids) => {
+                                let (gone, failed) = library.delete_files(&ids)?;
+                                let mut message =
+                                    format!("Deleted {} from the disk.", plural(gone, "file"));
+                                for line in failed.iter().take(3) {
+                                    message.push_str(&format!("\nCould not delete {line}"));
+                                }
+                                send(Event::Message(message));
+                                Ok(())
+                            }
+                            Command::RemoveCover(ids) => {
+                                for id in ids {
+                                    library.remove_cover(id)?;
+                                }
+                                Ok(())
                             }
                             Command::Add(path) => library.add_source(&path),
                             Command::Remove(path) => library.remove_source(&path),

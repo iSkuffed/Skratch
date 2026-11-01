@@ -66,7 +66,7 @@ impl Quick {
             }
             Self::TryAgain => "Ask the lyric services again",
             Self::Automatic => "Drop the lyrics typed, imported or cleared and look again",
-            Self::Type => "Type the lyrics in yourself",
+            Self::Type => "Edit the lyrics shown, or type your own (empty when there are none)",
             Self::Import => "Bring the lyrics in from a .lrc or .txt file",
             Self::Clear => "Wrong lyrics: forget them and stop looking for this track",
             Self::Wrong => {
@@ -578,7 +578,7 @@ impl Skratch {
             };
             return vec![
                 (first.0, first.1, false),
-                (Quick::Type, "Type", false),
+                (Quick::Type, "Edit", false),
                 (Quick::Import, "Import", false),
                 if self.lyrics.online_shown() {
                     (Quick::Wrong, "Wrong", false)
@@ -623,7 +623,12 @@ impl Skratch {
                 lyrics::restore(&dir, track);
                 self.lyrics.retry();
             }
-            Quick::Type => self.lyrics.editing = Some(String::new()),
+            Quick::Type => {
+                self.lyrics.editing = Some(match &self.lyrics.status {
+                    Status::Found(found) => found.to_text(),
+                    _ => String::new(),
+                });
+            }
             Quick::Import => self.import_lyrics_file(ctx),
             Quick::Clear => self.save_lyrics(&dir, track, ""),
             Quick::Wrong => self.wrong_lyrics(&dir, track),
@@ -887,20 +892,13 @@ impl Skratch {
             {
                 let label = match quick {
                     Quick::LookUp => "Look up online",
-                    Quick::Type => "Type lyrics",
+                    Quick::Type => "Edit lyrics",
                     _ => label,
                 };
                 if ui.button(label).on_hover_text(quick.hint()).clicked() {
                     self.quick_apply(ui.ctx(), quick, track);
                     acted = true;
                 }
-            }
-            if ui.button("Edit lyrics").clicked() {
-                self.lyrics.editing = Some(match &self.lyrics.status {
-                    Status::Found(found) => found.to_text(),
-                    _ => String::new(),
-                });
-                acted = true;
             }
             if ui
                 .button("Clear lyrics")

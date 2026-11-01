@@ -244,35 +244,82 @@ fn lrclib(track: &Track, skip: &[String]) -> Result<Option<Lyrics>> {
     Ok(pick(&found, track.duration, skip))
 }
 
-/// NetEase song ids worth fetching lyrics for: about as long as the file and by the same
-/// artist (when the track has one), best match first.
-fn netease_ids(results: &Value, duration: f64, artist: &str) -> Vec<u64> {
+/// A song title reduced to what names the song: no filler, no (bracketed) parts, no
+/// punctuation or case.
+fn plain_title(title: &str) -> String {
+    let mut depth = 0_u32;
+    let core: String = tagparse::strip_noise(title)
+        .chars()
+        .filter(|c| match c {
+            '(' | '[' | '（' | '【' => {
+                depth += 1;
+                false
+            }
+            ')' | ']' | '）' | '】' => {
+                depth = depth.saturating_sub(1);
+                false
+            }
+            _ => depth == 0,
+        })
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    core
+}
+
+/// NetEase song ids worth fetching lyrics for. NetEase is strict because it answers
+/// confidently with the wrong song (unreleased tracks, fan uploads, same-named songs): the
+/// length has to be within three seconds (so a track with no length gets nothing), the title
+/// has to be the same once brackets and filler are ignored, and the artist (when the track
+/// has one) has to be among the song's.
+fn netease_ids(results: &Value, duration: f64, artist: &str, title: &str) -> Vec<u64> {
     let artist = artist.trim().to_lowercase();
+    let title = plain_title(title);
     let by_artist = |song: &Value| {
         artist.is_empty()
             || song["artists"].as_array().is_some_and(|names| {
                 names.iter().filter_map(|a| a["name"].as_str()).any(|name| {
                     let name = name.trim().to_lowercase();
-                    !name.is_empty() && (artist.contains(&name) || name.contains(&artist))
+                    name.chars().count() >= 3 && (artist.contains(&name) || name.contains(&artist))
                 })
             })
     };
+    let same_title = |song: &Value| {
+        !title.is_empty()
+            && song["name"]
+                .as_str()
+                .is_some_and(|name| plain_title(name) == title)
+    };
     let close = |song: &Value| {
-        duration <= 0.0
-            || song["duration"]
+        duration > 0.0
+            && song["duration"]
                 .as_f64()
-                .is_some_and(|ms| (ms / 1000.0 - duration).abs() <= 5.0)
+                .is_some_and(|ms| (ms / 1000.0 - duration).abs() <= 3.0)
     };
     results["result"]["songs"]
         .as_array()
         .map(|songs| {
             songs
                 .iter()
-                .filter(|song| close(song) && by_artist(song))
+                .filter(|song| close(song) && same_title(song) && by_artist(song))
                 .filter_map(|song| song["id"].as_u64())
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Whether lyrics NetEase gave can be this track's: timed (plain text cannot be checked), with
+/// real content, and ending where the song does, not after it or far short of it.
+fn netease_fits(lyrics: &Lyrics, duration: f64) -> bool {
+    let Lyrics::Synced(lines) = lyrics else {
+        return false;
+    };
+    let sung = lines
+        .iter()
+        .filter(|(_, text)| !text.trim().is_empty())
+        .count();
+    let last = lines.last().map_or(0.0, |line| line.0);
+    sung >= 6 && last <= duration + 2.0 && last >= duration * 0.3
 }
 
 /// NetEase puts credits (`作词 : ...`) in the first lines; they are not lyrics.
@@ -304,7 +351,7 @@ fn netease(track: &Track, skip: &[String]) -> Result<Option<Lyrics>> {
         "https://music.163.com/api/search/get",
         &[("s", q.trim()), ("type", "1"), ("limit", "10")],
     )?;
-    for id in netease_ids(&found, track.duration, &track.artist)
+    for id in netease_ids(&found, track.duration, &track.artist, &track.title)
         .into_iter()
         .take(3)
     {
@@ -316,7 +363,7 @@ fn netease(track: &Track, skip: &[String]) -> Result<Option<Lyrics>> {
         if let Some(lyrics) = answer["lrc"]["lyric"]
             .as_str()
             .and_then(|lrc| Lyrics::from_text(&without_credits(lrc)))
-            .filter(|l| !is_rejected(skip, l))
+            .filter(|l| netease_fits(l, track.duration) && !is_rejected(skip, l))
         {
             return Ok(Some(lyrics));
         }
@@ -434,7 +481,7 @@ fn remember(dir: &Path, track: &Track, lyrics: Option<&Lyrics>, origin: Origin) 
     let _ = fs::create_dir_all(dir).and_then(|()| {
         fs::write(
             cache_file(dir, track),
-            json!({"synced": synced, "plain": plain, "source": origin.key()}).to_string(),
+            json!({"synced": synced, "plain": plain, "source": origin.key(), "v": 2}).to_string(),
         )
     });
 }
@@ -551,6 +598,8 @@ fn find(track: &Track, dir: &Path, online: Online) -> Answer {
     let cache = cache_file(dir, track);
     if let Ok(bytes) = fs::read(&cache)
         && let Ok(saved) = serde_json::from_slice::<Value>(&bytes)
+        // NetEase answers saved before it was checked closely are asked for again
+        && !(saved["source"].as_str() == Some("netease") && saved["v"].as_u64() != Some(2))
     {
         let text = |key: &str| saved[key].as_str().and_then(Lyrics::from_text);
         if let Some(lyrics) = text("synced").or_else(|| text("plain")) {
@@ -1050,23 +1099,47 @@ mod tests {
     }
 
     #[test]
-    fn netease_results_must_match_length_and_artist_and_drop_credits() {
+    fn netease_results_must_match_length_title_and_artist_and_drop_credits() {
         let results = json!({"result": {"songs": [
-            {"id": 1, "duration": 400000, "artists": [{"name": "Daft Punk"}]},
-            {"id": 2, "duration": 181000, "artists": [{"name": "Someone Else"}]},
-            {"id": 3, "duration": 180500, "artists": [{"name": "Pharrell"}, {"name": "daft punk"}]},
+            {"id": 1, "name": "One More Time", "duration": 400000, "artists": [{"name": "Daft Punk"}]},
+            {"id": 2, "name": "One More Time", "duration": 181000, "artists": [{"name": "Someone Else"}]},
+            {"id": 3, "name": "One More Time (Remastered)", "duration": 179500, "artists": [{"name": "Pharrell"}, {"name": "daft punk"}]},
+            {"id": 4, "name": "One More Night", "duration": 180000, "artists": [{"name": "Daft Punk"}]},
+            {"id": 5, "name": "One More Time", "duration": 183500, "artists": [{"name": "Daft Punk"}]},
         ]}});
-        assert_eq!(netease_ids(&results, 180.0, "Daft Punk"), vec![3]);
-        assert_eq!(netease_ids(&results, 180.0, ""), vec![2, 3]);
-        assert_eq!(
-            netease_ids(&json!({"code": 200}), 180.0, "x"),
-            Vec::<u64>::new()
-        );
+        let ids = |duration, artist, title| netease_ids(&results, duration, artist, title);
+        // right length, title (brackets ignored) and artist
+        assert_eq!(ids(180.0, "Daft Punk", "One More Time"), vec![3]);
+        // another artist's song of the same name, other titles, and lengths 3+ s out are refused
+        assert_eq!(ids(180.0, "", "One More Time"), vec![2, 3]);
+        // a track with no length cannot be checked
+        assert!(ids(0.0, "Daft Punk", "One More Time").is_empty());
+        assert!(ids(180.0, "Daft Punk", "").is_empty());
+        assert!(netease_ids(&json!({"code": 200}), 180.0, "x", "y").is_empty());
         let lrc = "[00:00.000] 作词 : Someone\n[00:01.000] 作曲：Someone\n[00:05.000]Hello there";
         assert_eq!(
             Lyrics::from_text(&without_credits(lrc)),
             Some(Lyrics::Synced(vec![(5.0, "Hello there".into())]))
         );
+    }
+
+    #[test]
+    fn netease_lyrics_must_be_timed_and_end_with_the_song() {
+        let lines = |last: f64| {
+            Lyrics::Synced(
+                (0..8)
+                    .map(|i| (f64::from(i) * last / 7.0, "words".to_string()))
+                    .collect(),
+            )
+        };
+        assert!(netease_fits(&lines(170.0), 180.0));
+        assert!(!netease_fits(&lines(260.0), 180.0), "runs past the end");
+        assert!(!netease_fits(&lines(30.0), 180.0), "ends far too early");
+        assert!(!netease_fits(&Lyrics::Plain("words".into()), 180.0));
+        assert!(!netease_fits(
+            &Lyrics::Synced(vec![(1.0, "one".into())]),
+            3.0
+        ));
     }
 
     #[test]
@@ -1139,6 +1212,13 @@ mod tests {
             Origin::NetEase,
         );
         assert_eq!(origin(&track), Some(Origin::NetEase));
+        // a NetEase answer saved before NetEase was checked closely is not believed
+        fs::write(
+            cache_file(&cache, &track),
+            r#"{"plain":"words","source":"netease"}"#,
+        )
+        .unwrap();
+        assert_eq!(origin(&track), None);
         // one remembered before the service was noted
         fs::write(cache_file(&cache, &track), r#"{"plain":"words"}"#).unwrap();
         assert_eq!(origin(&track), Some(Origin::Earlier));

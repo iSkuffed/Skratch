@@ -1,6 +1,7 @@
 //! Online cover search: iTunes plus MusicBrainz / Cover Art Archive.
 //! Only ever called from a button press, one search at a time.
 use anyhow::{Context, Result, ensure};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{sync::OnceLock, time::Duration};
 
@@ -11,11 +12,11 @@ const USER_AGENT: &str = concat!(
 );
 const MAX_IMAGE: u64 = 8 * 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Candidate {
     /// "Artist - Album (2020)"
     pub label: String,
-    pub source: &'static str,
+    pub source: String,
     pub thumb: String,
     pub full: String,
 }
@@ -118,7 +119,7 @@ fn parse_itunes(json: &Value) -> Vec<Candidate> {
         seen.push(label.clone());
         out.push(Candidate {
             label,
-            source: "iTunes",
+            source: "iTunes".to_owned(),
             thumb: thumb.to_owned(),
             // the CDN serves any size by swapping the name in the URL
             full: thumb.replace("100x100", "600x600"),
@@ -164,7 +165,7 @@ fn parse_musicbrainz(json: &Value) -> Vec<Candidate> {
             let base = format!("https://coverartarchive.org/release-group/{id}");
             Some(Candidate {
                 label: format!("{artist} - {title}{year}"),
-                source: "MusicBrainz",
+                source: "MusicBrainz".to_owned(),
                 thumb: format!("{base}/front-250"),
                 full: format!("{base}/front-500"),
             })
@@ -188,6 +189,8 @@ pub struct TagMatch {
     pub album: String,
     pub year: Option<u32>,
     pub track_number: Option<u32>,
+    /// MusicBrainz id of the album (release group) this is from, to look its first year up.
+    pub group: Option<String>,
     /// A high search score and a matching length, so safe to apply without a second look.
     pub strong: bool,
 }
@@ -327,8 +330,26 @@ fn recording_match(recording: &Value, release: &Value, fits: bool) -> Option<Tag
         track_number: release["media"][0]["track"][0]["number"]
             .as_str()
             .and_then(|n| n.parse().ok()),
+        group: release["release-group"]["id"].as_str().map(str::to_owned),
         strong: recording["score"].as_u64().unwrap_or(0) >= 90 && fits,
     })
+}
+
+/// The year an album (MusicBrainz release group) first came out in, whichever release it was
+/// found on. A reissue's own date would be wrong for the song.
+pub fn first_release_year(group: &str) -> Result<Option<u32>> {
+    ensure!(
+        !group.is_empty() && group.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+        "not a MusicBrainz id"
+    );
+    let json = get_json(
+        &format!("https://musicbrainz.org/ws/2/release-group/{group}"),
+        &[("fmt", "json")],
+    )?;
+    Ok(json["first-release-date"]
+        .as_str()
+        .and_then(|d| d.get(..4))
+        .and_then(|y| y.parse().ok()))
 }
 
 #[cfg(test)]

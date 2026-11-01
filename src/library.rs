@@ -120,6 +120,9 @@ impl Library {
              );
              CREATE INDEX IF NOT EXISTS track_sources_by_source
                  ON track_sources(source_path);
+             CREATE TABLE IF NOT EXISTS excluded (
+                 path TEXT PRIMARY KEY NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS track_stats (
                  track_id INTEGER PRIMARY KEY NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
                  plays INTEGER NOT NULL DEFAULT 0,
@@ -177,6 +180,82 @@ impl Library {
         let source = path_text(&source, "source directory")?;
         let transaction = self.connection.transaction()?;
         transaction.execute("DELETE FROM sources WHERE path = ?1", [&source])?;
+        let artwork = orphan_artwork(&transaction)?;
+        transaction.execute(
+            "DELETE FROM tracks
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM track_sources WHERE track_sources.track_id = tracks.id
+             )",
+            [],
+        )?;
+        transaction.commit()?;
+        for image in artwork {
+            let path = PathBuf::from(image);
+            if path.starts_with(&self.artwork_dir) {
+                let _ = fs::remove_file(path);
+            }
+        }
+        Ok(())
+    }
+
+    /// Files the user took out of Skratch: scans skip them, though they stay on the disk.
+    pub fn excluded(&self) -> Result<Vec<PathBuf>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT path FROM excluded ORDER BY path")?;
+        let paths = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .map(|row| row.map(PathBuf::from))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(paths)
+    }
+
+    /// Takes these tracks out of the library and keeps scans from finding them again. The
+    /// files are not touched.
+    pub fn exclude(&mut self, ids: &[i64]) -> Result<()> {
+        for id in ids {
+            let path = track_by_id(&self.connection, *id)?.path;
+            let path = path_text(&path, "excluded file")?.to_owned();
+            self.connection
+                .execute("INSERT OR IGNORE INTO excluded(path) VALUES (?1)", [path])?;
+        }
+        self.drop_tracks(ids)
+    }
+
+    /// Lets these excluded files be found by scans again.
+    pub fn include_again(&mut self, paths: &[PathBuf]) -> Result<()> {
+        for path in paths {
+            if let Some(path) = path.to_str() {
+                self.connection
+                    .execute("DELETE FROM excluded WHERE path = ?1", [path])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Deletes these tracks' files from the disk (for good) and takes them out of the library.
+    /// Returns how many files went and what could not be deleted.
+    pub fn delete_files(&mut self, ids: &[i64]) -> Result<(usize, Vec<String>)> {
+        let _writing = MEDIA_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut gone, mut failed) = (Vec::new(), Vec::new());
+        for id in ids {
+            let path = track_by_id(&self.connection, *id)?.path;
+            match fs::remove_file(&path) {
+                Ok(()) => gone.push(*id),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => gone.push(*id),
+                Err(e) => failed.push(format!("{}: {e}", path_label(&path))),
+            }
+        }
+        self.drop_tracks(&gone)?;
+        Ok((gone.len(), failed))
+    }
+
+    /// Removes the rows (and cached covers) of these tracks.
+    fn drop_tracks(&mut self, ids: &[i64]) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        for id in ids {
+            transaction.execute("DELETE FROM track_sources WHERE track_id = ?1", [id])?;
+        }
         let artwork = orphan_artwork(&transaction)?;
         transaction.execute(
             "DELETE FROM tracks
@@ -253,6 +332,11 @@ impl Library {
     pub fn scan(&mut self, force: bool) -> Result<ScanReport> {
         let source_paths = self.sources()?;
         let mut report = ScanReport::default();
+        let excluded: HashSet<String> = self
+            .excluded()?
+            .iter()
+            .filter_map(|p| p.to_str().map(str::to_owned))
+            .collect();
         let mut all_found = HashSet::new();
         let mut parse_fallbacks = BTreeMap::<String, usize>::new();
         let transaction = self.connection.transaction()?;
@@ -324,7 +408,7 @@ impl Library {
                         continue;
                     }
                 };
-                if !is_audio_file(file_path) {
+                if !is_audio_file(file_path) || excluded.contains(file_text) {
                     continue;
                 }
                 let metadata = match fs::metadata(file_path) {
@@ -693,13 +777,40 @@ impl Library {
 
     /// Gives a track a cover. It is always kept in Skratch's own artwork cache, where scans
     /// leave it alone. With `embed` it is also written into the audio file.
+    /// Takes the pictures out of the file (undoing an applied suggestion, which only happens
+    /// for a song that had none) and clears the
+    /// track's artwork; a cover of another kind or a picture file next to it shows again at
+    /// the next scan.
+    pub fn remove_cover(&mut self, id: i64) -> Result<()> {
+        let _writing = MEDIA_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+        let track = track_by_id(&self.connection, id)?;
+        embed_cover(&track.path, None)?;
+        let metadata = fs::metadata(&track.path).context("inspect edited media file")?;
+        self.connection.execute(
+            "UPDATE tracks SET size = ?1, modified_ns = ?2, artwork = NULL,
+                 artwork_source = NULL, artwork_size = NULL, artwork_modified_ns = NULL
+             WHERE id = ?3",
+            params![
+                metadata.len().min(i64::MAX as u64) as i64,
+                modified_ns(&metadata),
+                id
+            ],
+        )?;
+        if let Some(old) = track.artwork
+            && old.starts_with(&self.artwork_dir)
+        {
+            let _ = fs::remove_file(old);
+        }
+        Ok(())
+    }
+
     pub fn set_cover(&mut self, id: i64, image: &[u8], embed: bool) -> Result<()> {
         let mut artwork =
             make_artwork(image, "online".to_owned())?.context("this is not a usable image")?;
         if embed {
             let _writing = MEDIA_WRITE.lock().unwrap_or_else(|e| e.into_inner());
             let track = track_by_id(&self.connection, id)?;
-            embed_cover(&track.path, image)?;
+            embed_cover(&track.path, Some(image))?;
             let metadata = fs::metadata(&track.path).context("inspect edited media file")?;
             // record the new size/mtime so the scan treats this as our own edit
             self.connection.execute(
@@ -738,7 +849,7 @@ fn avoid_id3v1(file: &mut TaggedFile) -> TagType {
 
 /// Writes `image` as the front cover of `path` through a temporary copy, so a failed write
 /// cannot damage the original.
-fn embed_cover(path: &Path, image: &[u8]) -> Result<()> {
+fn embed_cover(path: &Path, image: Option<&[u8]>) -> Result<()> {
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("inspect media file {}", path_label(path)))?;
     ensure!(
@@ -772,10 +883,20 @@ fn embed_cover(path: &Path, image: &[u8]) -> Result<()> {
     let tag = tagged_file
         .primary_tag_mut()
         .context("audio format has no writable primary tag")?;
-    let mut picture = Picture::from_reader(&mut &image[..]).context("unsupported cover image")?;
-    picture.set_pic_type(PictureType::CoverFront);
     tag.remove_picture_type(PictureType::CoverFront);
-    tag.push_picture(picture);
+    if image.is_none() {
+        // MP4 files do not keep a picture's kind, so a cover read back is not a "front cover";
+        // taking a cover out means taking the pictures out
+        while !tag.pictures().is_empty() {
+            tag.remove_picture(0);
+        }
+    }
+    if let Some(image) = image {
+        let mut picture =
+            Picture::from_reader(&mut &image[..]).context("unsupported cover image")?;
+        picture.set_pic_type(PictureType::CoverFront);
+        tag.push_picture(picture);
+    }
     tagged_file
         .save_to_path(temporary.path(), WriteOptions::default())
         .context("write cover to temporary media file")?;

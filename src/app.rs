@@ -296,6 +296,8 @@ pub struct Skratch {
     frame_at: Instant,
     listen: listen::Listen,
     suggest: suggest::Suggest,
+    /// Files taken out of Skratch (kept on the disk, skipped by scans).
+    excluded: Vec<PathBuf>,
 }
 
 impl Skratch {
@@ -344,6 +346,7 @@ impl Skratch {
             }
         };
         let setup = (!state.setup_done).then(|| setup::Setup::new(false));
+        let suggest = suggest::Suggest::new(wake.clone(), &data_dir);
         let mut app = Self {
             service: service::Service::start(data_dir.clone(), wake.clone()),
             tracks: Vec::new(),
@@ -420,7 +423,8 @@ impl Skratch {
             drawer: Default::default(),
             frame_at: Instant::now(),
             listen: Default::default(),
-            suggest: suggest::Suggest::new(wake.clone()),
+            suggest,
+            excluded: Vec::new(),
         };
         app.refresh_tools();
         app
@@ -805,6 +809,7 @@ impl Skratch {
                     self.busy_since = value.then(std::time::Instant::now);
                 }
                 Event::Message(message) => self.message(message),
+                Event::Excluded(list) => self.excluded = list,
                 Event::Edited(id) => {
                     if self.editor.as_ref().is_some_and(|editor| editor.id == id) {
                         self.editor = None;
@@ -2714,7 +2719,7 @@ impl Skratch {
                             let text = painter.with_clip_rect(egui::Rect::from_min_size(rect.min + egui::vec2(0.0, 134.0), egui::vec2(132.0, 34.0)));
                             let label = painter.layout(found.candidate.label.clone(), egui::FontId::proportional(12.0), style::CREAM, 124.0);
                             text.galley(rect.min + egui::vec2(4.0, 137.0), label, style::CREAM);
-                            painter.text(rect.min + egui::vec2(4.0, 178.0), egui::Align2::LEFT_CENTER, found.candidate.source, egui::FontId::proportional(11.0), style::CREAM_DIM);
+                            painter.text(rect.min + egui::vec2(4.0, 178.0), egui::Align2::LEFT_CENTER, &found.candidate.source, egui::FontId::proportional(11.0), style::CREAM_DIM);
                             let response = response.on_hover_text(&found.candidate.label);
                             if response.clicked() {
                                 cover.chosen = Some(i);
@@ -2905,15 +2910,26 @@ impl eframe::App for Skratch {
             }
             let outline = ui.max_rect();
             self.title_bar(ui, radius);
-            if !self.messages.is_empty() {
-                egui::TopBottomPanel::top("messages").show_inside(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.colored_label(self.accent, self.messages.last().unwrap());
-                        if ui.small_button("Dismiss").clicked() {
-                            self.messages.pop();
-                        }
+            if let Some(text) = self.messages.last().cloned() {
+                // floats over the page, so it never pushes the layout around
+                let mut dismissed = false;
+                egui::Area::new(egui::Id::new("messages"))
+                    .order(egui::Order::Foreground)
+                    .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 44.0))
+                    .show(ui.ctx(), |ui| {
+                        Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.set_max_width(520.0);
+                            ui.horizontal(|ui| {
+                                ui.colored_label(self.accent, &text);
+                                if ui.small_button("Dismiss").clicked() {
+                                    dismissed = true;
+                                }
+                            });
+                        });
                     });
-                });
+                if dismissed {
+                    self.messages.pop();
+                }
             }
             self.player_bar(ui, radius);
             self.sidebar(ui);

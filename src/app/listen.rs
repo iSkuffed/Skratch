@@ -93,6 +93,8 @@ pub struct Listen {
 enum TidyTab {
     Copies,
     Tags,
+    Suggestions,
+    Excluded,
 }
 
 impl Default for Listen {
@@ -583,7 +585,7 @@ impl Skratch {
         ui.add_space(10.0);
         ui.heading(View::Tidy.title());
         ui.label(
-            RichText::new("Finds songs that are in your library twice and tags that look unfinished. Nothing here changes a file until you open one and save.")
+            RichText::new("Finds songs that are in your library twice, tags that look unfinished and fixes found online. Exclude takes a song out of Skratch and leaves the file alone; Delete removes the file from the disk for good.")
                 .color(style::CREAM_DIM),
         );
         ui.add_space(8.0);
@@ -602,11 +604,23 @@ impl Skratch {
                 TidyTab::Tags,
                 format!("Unfinished tags ({})", tidy.loose.len()),
             );
+            ui.selectable_value(
+                &mut self.listen.tidy_tab,
+                TidyTab::Suggestions,
+                format!("Suggestions ({})", self.suggest.waiting()),
+            );
+            ui.selectable_value(
+                &mut self.listen.tidy_tab,
+                TidyTab::Excluded,
+                format!("Excluded ({})", self.excluded.len()),
+            );
         });
         ui.separator();
         match self.listen.tidy_tab {
             TidyTab::Copies => self.copies_page(ui, &tidy),
             TidyTab::Tags => self.loose_page(ui, &tidy),
+            TidyTab::Suggestions => self.suggestions_page(ui),
+            TidyTab::Excluded => self.excluded_page(ui),
         }
         // the page may have changed the library; the next snapshot rebuilds this
         if self.listen.tidy.is_none() {
@@ -705,6 +719,46 @@ impl Skratch {
             });
     }
 
+    fn excluded_page(&mut self, ui: &mut egui::Ui) {
+        if self.excluded.is_empty() {
+            ui.add_space(20.0);
+            ui.label("Nothing is excluded. Songs you exclude on the Duplicates or Unfinished tags tab are listed here, so they can be brought back.");
+            return;
+        }
+        let paths = self.excluded.clone();
+        if ui
+            .button("Bring all back")
+            .on_hover_text("Let scans find these files again")
+            .clicked()
+        {
+            self.command(Command::Include(paths.clone()));
+        }
+        ui.separator();
+        let height = 28.0;
+        style::scroll()
+            .id_salt("tidy-excluded")
+            .show_rows(ui, height, paths.len(), |ui, range| {
+                for path in &paths[range] {
+                    ui.allocate_ui_with_layout(
+                        vec2(ui.available_width(), height - 4.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            if ui.small_button("Bring back").clicked() {
+                                self.command(Command::Include(vec![path.clone()]));
+                            }
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(path.display().to_string())
+                                        .color(style::CREAM_DIM),
+                                )
+                                .truncate(),
+                            );
+                        },
+                    );
+                }
+            });
+    }
+
     /// One track on the Tidy page: what it is, a note, and buttons to play or edit it.
     fn tidy_track(&mut self, ui: &mut egui::Ui, index: usize, note: Option<String>) {
         let track = &self.tracks[index];
@@ -728,6 +782,21 @@ impl Skratch {
         if ui.small_button("Edit").clicked() {
             self.action = Some(Action::Edit(id));
         }
+        if ui
+            .small_button("Exclude")
+            .on_hover_text("Take it out of Skratch. The file stays on the disk and scans skip it; Excluded lists it to bring back.")
+            .clicked()
+        {
+            self.command(Command::Exclude(vec![id]));
+        }
+        if confirm_button(
+            ui,
+            "Delete",
+            "This will delete the file from the disk. This CAN NOT be undone. Are you sure?",
+            "Yes, delete",
+        ) {
+            self.command(Command::Delete(vec![id]));
+        }
         let text = match &note {
             Some(note) => format!("{title}  -  {artist}   ({note})"),
             None => format!("{album}  ·  {}  ·  {name}", time(length)),
@@ -735,6 +804,31 @@ impl Skratch {
         ui.add(egui::Label::new(RichText::new(text).color(style::CREAM_DIM)).truncate())
             .on_hover_text(path);
     }
+}
+
+/// A button that asks "are you sure?" in a small popup beside it; true when answered yes.
+pub(super) fn confirm_button(ui: &mut egui::Ui, label: &str, question: &str, yes: &str) -> bool {
+    let button = ui.small_button(label);
+    let mut confirmed = false;
+    egui::Popup::from_toggle_button_response(&button)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_max_width(280.0);
+            ui.label(question);
+            ui.horizontal(|ui| {
+                if ui
+                    .button(RichText::new(yes).color(egui::Color32::from_rgb(235, 100, 90)))
+                    .clicked()
+                {
+                    confirmed = true;
+                    ui.close();
+                }
+                if ui.button("No").clicked() {
+                    ui.close();
+                }
+            });
+        });
+    confirmed
 }
 
 fn fade_label(seconds: u8) -> String {

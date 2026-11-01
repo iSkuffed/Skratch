@@ -7,7 +7,13 @@ use crate::{
 };
 use anyhow::Result;
 use eframe::egui;
-use std::time::Duration;
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 /// How long "nothing was found" is believed before the song is looked up again.
 const NOTHING_TTL: i64 = 7 * 24 * 3600;
@@ -19,39 +25,115 @@ const PAUSE: Duration = Duration::from_millis(1100);
 pub const MOST: usize = 3;
 
 /// One field a suggestion would change.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Change {
-    pub field: &'static str,
+    pub field: String,
     pub from: String,
     pub to: String,
 }
 
 /// One possible answer: tags to write, a cover to embed, or both.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Choice {
-    /// The song's tags with the suggestion filled in; `None` when no tag would change.
-    pub edit: Option<MetadataEdit>,
     pub changes: Vec<Change>,
     pub cover: Option<Candidate>,
-    /// A small picture of `cover`, when it could be fetched.
+    /// A small picture of `cover`, when it could be fetched (not kept between runs).
+    #[serde(skip)]
     pub thumb: Option<egui::ColorImage>,
 }
 
 impl Choice {
-    /// The tags to write for `track` as it is now: only the fields this choice changes are
-    /// taken, so edits made since the lookup are kept.
-    pub fn edit_for(&self, track: &Track) -> Option<MetadataEdit> {
-        let wanted = self.edit.as_ref()?;
+    /// The song's tags with every change taken (`forward`) or put back as they were.
+    fn edit_with(&self, track: &Track, forward: bool) -> Option<MetadataEdit> {
+        if self.changes.is_empty() {
+            return None;
+        }
         let mut edit = MetadataEdit::from(track);
         for change in &self.changes {
-            match change.field {
-                "Title" => edit.title.clone_from(&wanted.title),
-                "Artist" => edit.artist.clone_from(&wanted.artist),
-                "Album" => edit.album.clone_from(&wanted.album),
-                "Year" => edit.year = wanted.year,
-                _ => edit.track_number = wanted.track_number,
+            let value = if forward { &change.to } else { &change.from };
+            match change.field.as_str() {
+                "Title" => edit.title.clone_from(value),
+                "Artist" => edit.artist.clone_from(value),
+                "Album" => edit.album.clone_from(value),
+                "Year" => edit.year = value.parse().ok(),
+                _ => edit.track_number = value.parse().ok(),
             }
         }
         Some(edit)
+    }
+
+    /// The tags to write for `track` as it is now: only the fields this choice changes are
+    /// taken, so edits made since the lookup are kept.
+    pub fn edit_for(&self, track: &Track) -> Option<MetadataEdit> {
+        self.edit_with(track, true)
+    }
+
+    /// The tags that put the song back as it was before this choice was applied.
+    pub fn undo_for(&self, track: &Track) -> Option<MetadataEdit> {
+        self.edit_with(track, false)
+    }
+
+    /// Whether this still offers something the song lacks (it may have been fixed by hand
+    /// since the lookup).
+    pub fn useful_for(&self, track: &Track) -> bool {
+        let number = |n: Option<u32>| n.map(|n| n.to_string()).unwrap_or_default();
+        let differs = |change: &Change| {
+            let now = match change.field.as_str() {
+                "Title" => track.title.clone(),
+                "Artist" => track.artist.clone(),
+                "Album" => track.album.clone(),
+                "Year" => number(track.year),
+                _ => number(track.track_number),
+            };
+            now != change.to
+        };
+        self.changes.iter().any(differs) || (self.cover.is_some() && track.artwork.is_none())
+    }
+}
+
+/// A suggestion the user took, kept so it can be undone.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Applied {
+    pub id: i64,
+    pub label: String,
+    pub choice: Choice,
+    /// Whether the tags / the cover were written.
+    pub tags: bool,
+    pub cover: bool,
+}
+
+/// What is remembered between runs: answers waiting for the user, and what was applied.
+#[derive(Default, Serialize, Deserialize)]
+pub struct Store {
+    pub waiting: BTreeMap<i64, Vec<Choice>>,
+    pub applied: Vec<Applied>,
+}
+
+/// How many applied suggestions can still be undone.
+const KEEP_APPLIED: usize = 40;
+
+impl Store {
+    fn file(dir: &Path) -> PathBuf {
+        dir.join("suggestions.json")
+    }
+
+    pub fn load(dir: &Path) -> Self {
+        fs::read(Self::file(dir))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&mut self, dir: &Path) {
+        let excess = self.applied.len().saturating_sub(KEEP_APPLIED);
+        self.applied.drain(..excess);
+        let file = Self::file(dir);
+        let temporary = file.with_extension("json.tmp");
+        if let Ok(bytes) = serde_json::to_vec(self)
+            && fs::write(&temporary, bytes).is_ok()
+        {
+            let _ = fs::rename(&temporary, &file);
+        }
     }
 }
 
@@ -92,7 +174,7 @@ pub fn changes(track: &Track, edit: &MetadataEdit) -> Vec<Change> {
     .into_iter()
     .filter(|(_, from, to)| from != to)
     .map(|(field, from, to)| Change {
-        field,
+        field: field.to_owned(),
         from: from.clone(),
         to: to.clone(),
     })
@@ -145,6 +227,17 @@ fn cover_for(list: Vec<Candidate>, album: &str) -> Option<Candidate> {
         .find(|c| !album.is_empty() && plain(&c.label).contains(&album))
 }
 
+/// Puts the album's first year on a match (a reissue's own year would be wrong). A track number
+/// belongs to one release, so on a reissue it is dropped rather than guessed.
+fn with_first_year(found: &mut TagMatch, first: Option<u32>) {
+    if let Some(first) = first
+        && found.year.is_none_or(|year| first < year)
+    {
+        found.year = Some(first);
+        found.track_number = None;
+    }
+}
+
 /// Repeats a request the server answered "busy" to, a few times.
 fn patient<T>(mut ask: impl FnMut() -> Result<T>) -> Result<T> {
     for _ in 0..2 {
@@ -156,7 +249,7 @@ fn patient<T>(mut ask: impl FnMut() -> Result<T>) -> Result<T> {
     ask()
 }
 
-fn thumbnail(candidate: &Candidate) -> Option<egui::ColorImage> {
+pub fn thumbnail(candidate: &Candidate) -> Option<egui::ColorImage> {
     let bytes = online::fetch_image(&candidate.thumb).ok()?;
     let image = image::load_from_memory(&bytes)
         .ok()?
@@ -180,6 +273,13 @@ pub fn find(track: &Track) -> Result<Vec<Choice>> {
         .into_iter()
         .filter(|m| m.strong && same_artist(&track.artist, &m.artist))
     {
+        let mut found = found;
+        if let Some(group) = found.group.clone() {
+            std::thread::sleep(PAUSE);
+            if let Ok(first) = patient(|| online::first_release_year(&group)) {
+                with_first_year(&mut found, first);
+            }
+        }
         let edit = fill(track, &found, false);
         let changes = changes(track, &edit);
         let album = if found.album.is_empty() {
@@ -205,7 +305,6 @@ pub fn find(track: &Track) -> Result<Vec<Choice>> {
         }
         let thumb = cover.as_ref().and_then(thumbnail);
         choices.push(Choice {
-            edit: (!changes.is_empty()).then_some(edit),
             changes,
             cover,
             thumb,
@@ -220,7 +319,6 @@ pub fn find(track: &Track) -> Result<Vec<Choice>> {
         {
             let thumb = thumbnail(&cover);
             choices.push(Choice {
-                edit: None,
                 changes: Vec::new(),
                 cover: Some(cover),
                 thumb,
@@ -252,6 +350,7 @@ mod tests {
             album: "Studio".into(),
             year: Some(2019),
             track_number: Some(7),
+            group: None,
             strong: true,
         };
         let edit = fill(&song(), &found, false);
@@ -261,14 +360,14 @@ mod tests {
         );
         let fields: Vec<_> = changes(&song(), &edit)
             .into_iter()
-            .map(|c| (c.field, c.to))
+            .map(|c| (c.field.as_str().to_owned(), c.to))
             .collect();
         assert_eq!(
             fields,
             [
-                ("Album", "Studio".into()),
-                ("Year", "2019".into()),
-                ("Track", "7".into())
+                ("Album".to_owned(), "Studio".to_owned()),
+                ("Year".to_owned(), "2019".to_owned()),
+                ("Track".to_owned(), "7".to_owned())
             ]
         );
         // replacing also takes the other fields
@@ -287,7 +386,7 @@ mod tests {
     fn only_a_cover_of_the_same_album_is_offered() {
         let candidate = |label: &str| Candidate {
             label: label.into(),
-            source: "iTunes",
+            source: "iTunes".to_owned(),
             thumb: String::new(),
             full: String::new(),
         };
@@ -312,12 +411,12 @@ mod tests {
             album: "Studio".into(),
             year: Some(2019),
             track_number: None,
+            group: None,
             strong: true,
         };
         let edit = fill(&song(), &found, false);
         let choice = Choice {
             changes: changes(&song(), &edit),
-            edit: Some(edit),
             cover: None,
             thumb: None,
         };
@@ -356,5 +455,77 @@ mod tests {
         assert!(wanted(&track, now), "a week has passed");
         track.title = " ".into();
         assert!(!wanted(&track, now));
+    }
+
+    #[test]
+    fn a_reissue_gets_the_albums_first_year_and_loses_its_track_number() {
+        let mut found = TagMatch {
+            artist: "Band".into(),
+            title: "Song".into(),
+            album: "Studio".into(),
+            year: Some(2011),
+            track_number: Some(14),
+            group: None,
+            strong: true,
+        };
+        with_first_year(&mut found, Some(1975));
+        assert_eq!((found.year, found.track_number), (Some(1975), None));
+        let mut original = TagMatch {
+            year: Some(1975),
+            track_number: Some(3),
+            ..found.clone()
+        };
+        with_first_year(&mut original, Some(1975));
+        with_first_year(&mut original, None);
+        assert_eq!(
+            (original.year, original.track_number),
+            (Some(1975), Some(3))
+        );
+    }
+
+    #[test]
+    fn a_choice_can_be_undone_and_is_remembered_between_runs() {
+        let found = TagMatch {
+            artist: "Band".into(),
+            title: "Song".into(),
+            album: "Studio".into(),
+            year: Some(2019),
+            track_number: Some(7),
+            group: None,
+            strong: true,
+        };
+        let edit = fill(&song(), &found, false);
+        let choice = Choice {
+            changes: changes(&song(), &edit),
+            cover: None,
+            thumb: None,
+        };
+        let mut done = song();
+        done.album = "Studio".into();
+        done.year = Some(2019);
+        done.track_number = Some(7);
+        assert!(choice.useful_for(&song()));
+        assert!(!choice.useful_for(&done), "already fixed by hand");
+        let back = choice.undo_for(&done).unwrap();
+        assert_eq!(
+            (back.album.as_str(), back.year, back.track_number),
+            ("", None, None)
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::default();
+        store.waiting.insert(9, vec![choice.clone()]);
+        store.applied.push(Applied {
+            id: 9,
+            label: "Band - Song".into(),
+            choice,
+            tags: true,
+            cover: false,
+        });
+        store.save(dir.path());
+        let loaded = Store::load(dir.path());
+        assert_eq!(loaded.waiting[&9][0].changes.len(), 3);
+        assert_eq!(loaded.applied[0].label, "Band - Song");
+        assert!(Store::load(&dir.path().join("nothing")).waiting.is_empty());
     }
 }
