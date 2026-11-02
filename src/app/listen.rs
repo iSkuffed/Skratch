@@ -10,7 +10,7 @@ use eframe::egui::{self, RichText, vec2};
 use skratch::{
     health::{self, Problem},
     lyrics::{self, Embedded},
-    model::Track,
+    model::{MetadataEdit, Track},
     player::Loudness,
 };
 use std::{
@@ -739,9 +739,53 @@ impl Skratch {
             return;
         }
         let ids: Vec<i64> = rows.iter().map(|(i, _)| self.tracks[*i].id).collect();
+        self.visible = ids.clone();
+        let picking = self.select_mode;
+        if picking {
+            // only what is listed counts, whatever was picked on another tab or filter
+            self.selected.retain(|id| ids.contains(id));
+        }
+        let working: Vec<i64> = if picking {
+            self.selected_ids()
+        } else {
+            ids.clone()
+        };
+        let albumless = |this: &Self, which: &[i64]| -> Vec<i64> {
+            this.tracks
+                .iter()
+                .filter(|t| which.contains(&t.id) && health::problems(t).contains(&Problem::NoAlbum))
+                .map(|t| t.id)
+                .collect()
+        };
         ui.horizontal_wrapped(|ui| {
-            ui.label(format!("For all {} listed:", ids.len()));
-            self.actions_button(ui, &ids);
+            if ui.selectable_label(self.select_mode, "Select").clicked() {
+                self.select_mode = !self.select_mode;
+                self.selected.clear();
+            }
+            if picking {
+                if ui.button("Select all").clicked() {
+                    self.selected.extend(ids.iter().copied());
+                }
+                if ui.button("Clear").clicked() {
+                    self.selected.clear();
+                }
+                ui.label(format!("{} selected", working.len()));
+            } else {
+                ui.label(format!("For all {} listed:", ids.len()));
+            }
+            self.actions_button(ui, &working);
+            let single = albumless(self, &working);
+            if ui
+                .add_enabled(
+                    !single.is_empty(),
+                    egui::Button::new(format!("Mark {} as Singles", single.len())),
+                )
+                .on_hover_text("For songs that are not on an album: write \"Singles\" as the album. Songs that already have an album are left alone, and a single needs no track number.")
+                .clicked()
+            {
+                self.mark_singles(&single);
+                self.selected.clear();
+            }
         });
         ui.separator();
         style::scroll().id_salt("tidy-loose").show_rows(
@@ -759,6 +803,45 @@ impl Skratch {
                 }
             },
         );
+    }
+
+    /// Writes "Singles" as the album of these songs.
+    fn mark_singles(&mut self, ids: &[i64]) {
+        let edits: Vec<(i64, MetadataEdit)> = self
+            .tracks
+            .iter()
+            .filter(|t| ids.contains(&t.id))
+            .map(|t| {
+                let mut edit = MetadataEdit::from(t);
+                edit.album = health::SINGLES.to_owned();
+                (t.id, edit)
+            })
+            .collect();
+        if !edits.is_empty() {
+            self.command(Command::EditMany(edits));
+        }
+    }
+
+    /// Ticks or unticks one listed song; Shift extends from the last one touched.
+    fn pick(&mut self, id: i64, on: bool, range: bool) {
+        let span = range
+            .then_some(self.anchor)
+            .flatten()
+            .and_then(|anchor| {
+                let from = self.visible.iter().position(|v| *v == anchor)?;
+                let to = self.visible.iter().position(|v| *v == id)?;
+                Some(self.visible[from.min(to)..=from.max(to)].to_vec())
+            });
+        match span {
+            Some(ids) if on => self.selected.extend(ids),
+            _ if on => {
+                self.selected.insert(id);
+            }
+            _ => {
+                self.selected.remove(&id);
+            }
+        }
+        self.anchor = Some(id);
     }
 
     fn excluded_page(&mut self, ui: &mut egui::Ui) {
@@ -825,12 +908,24 @@ impl Skratch {
             let folder = track.path.parent().map(|p| p.display().to_string());
             format!("{kind}  ·  {}", folder.unwrap_or_default())
         };
+        let picking = self.select_mode && self.listen.tidy_tab == TidyTab::Tags;
+        let mut ticked = self.selected.contains(&id);
+        let mut toggled = None;
+        let no_album = note.is_some() && health::problems(&track).contains(&Problem::NoAlbum);
         tidyrow::card(
             ui,
             tidyrow::ROW,
             236.0,
             |ui| {
                 ui.horizontal_top(|ui| {
+                    if picking {
+                        ui.vertical(|ui| {
+                            ui.add_space(22.0);
+                            if ui.checkbox(&mut ticked, "").clicked() {
+                                toggled = Some((ticked, ui.input(|i| i.modifiers.shift)));
+                            }
+                        });
+                    }
                     tidyrow::cover(ui, picture, "No cover");
                     ui.vertical(|ui| {
                         tidyrow::identity(ui, &track);
@@ -877,6 +972,14 @@ impl Skratch {
                         self.command(Command::Delete(vec![id]));
                     }
                 });
+                if no_album
+                    && ui
+                        .small_button("Single")
+                        .on_hover_text("Not on an album: write \"Singles\" as its album")
+                        .clicked()
+                {
+                    self.mark_singles(&[id]);
+                }
                 if !others.is_empty() {
                     ui.horizontal(|ui| {
                         if ui
@@ -898,6 +1001,9 @@ impl Skratch {
                 }
             },
         );
+        if let Some((on, range)) = toggled {
+            self.pick(id, on, range);
+        }
     }
 }
 

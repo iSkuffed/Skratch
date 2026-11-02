@@ -93,6 +93,9 @@ pub fn duplicates(tracks: &[Track]) -> Vec<Vec<usize>> {
     groups
 }
 
+/// The album a song that is not on any album is filed under. Such a song needs no track number.
+pub const SINGLES: &str = "Singles";
+
 /// What looks unfinished about this track's tags.
 pub fn problems(track: &Track) -> Vec<Problem> {
     let blank = |text: &str| {
@@ -109,7 +112,7 @@ pub fn problems(track: &Track) -> Vec<Problem> {
     if track.year.is_none() {
         found.push(Problem::NoYear);
     }
-    if track.track_number.is_none() {
+    if track.track_number.is_none() && !track.album.trim().eq_ignore_ascii_case(SINGLES) {
         found.push(Problem::NoTrackNumber);
     }
     if tagparse::strip_noise(&track.title).trim() != track.title.trim() {
@@ -199,6 +202,9 @@ mod tests {
         bare.track_number = None;
         assert_eq!(problems(&bare).len(), 6);
         assert!(problems(&track("The Band", "Invented Song", "Album", 100.0)).is_empty());
+        let mut single = track("The Band", "Invented Song", SINGLES, 100.0);
+        single.track_number = None;
+        assert!(problems(&single).is_empty());
         let tracks = vec![track("A", "Fine", "B", 1.0), bare];
         let found = untidy(&tracks, &[Problem::NoYear]);
         assert_eq!(found.len(), 1);
