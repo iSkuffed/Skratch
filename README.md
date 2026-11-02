@@ -12,7 +12,7 @@ Skratch has a vinyl theme: a spinning record with a tonearm in the player bar, g
 - **Tag editing:** edits go into the file itself, using a temp copy and an atomic rename so a failed write can't corrupt a track. Renaming never overwrites an existing file.
 - **Batch tagging from filenames:** select several tracks and fill their tags from names like `Artist - Title ft. Someone`. The pattern is configurable (`{artist} {title} {album} {track}`). Featured artists are detected automatically, and downloader clutter such as `(Official Video)` or a trailing `[video id]` is dropped.
 - **Cover search:** "Find cover online..." (track menu, album page, edit dialog, or a multi-selection) looks up covers on iTunes, Deezer and MusicBrainz / Cover Art Archive, on TheAudioDB when nothing else has one, and on Genius when "Also look for covers on Genius" is ticked (off by default, because Genius's terms do not allow automated use; its covers are labelled Genius, and for a single or unreleased track with no album it offers the song's own art). It only searches when you ask. By default the cover is kept in Skratch's own cache, survives rescans and never touches your audio files. Tick "Also save into the audio file" to embed it too, so other players show it; the choice is remembered. Double-click a cover to use it. With several albums selected, or "Find covers for the N tracks without one..." on the Albums page, it steps through them one at a time: pick a cover and the next album comes up.
-- **Downloads:** paste a link and Skratch runs `yt-dlp` + `ffmpeg` in the background, with progress and cancel.
+- **Downloads:** paste a link and Skratch runs `yt-dlp` + `ffmpeg` in the background, with progress and cancel. It works with whatever sites [yt-dlp supports](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md) (YouTube, SoundCloud, Bandcamp and many more), not Spotify, Apple Music or other DRM-protected services, and a playlist link saves only its first item.
 - **Playback:** queue, shuffle, repeat, seeking, media keys and the desktop now-playing widget (MPRIS). Opening the app never starts audio on its own.
 - **Plays and ratings:** a song counts as played once you have heard half of it (or four minutes), and its play count and last-played time are kept in Skratch's own database, not in the file. Give songs one to five stars on the Now playing details or from any track menu (it works on a whole selection). Sort lists by last played, play count or rating, and filter them to songs not played yet, played, or rated.
 - **Sleep timer:** the Sleep button in the player bar stops the music in 15 to 90 minutes, or at the end of the song, fading the sound out first.
@@ -31,7 +31,9 @@ Skratch looks things up on these services, only when you ask or have switched it
 
 ## Install
 
-Build from source (Rust toolchain, a C compiler, `pkg-config` and D-Bus headers are required; on Fedora that's `gcc pkgconf-pkg-config dbus-devel`, on Debian/Ubuntu `build-essential pkg-config libdbus-1-dev`):
+**AppImage (Linux, x86_64):** download `Skratch-<version>-x86_64.AppImage` from the [Releases](https://github.com/iSkuffed/Skratch/releases) page, make it executable (`chmod +x Skratch-*.AppImage`) and run it. It holds only Skratch; the welcome page below sets up the rest. Check the download against `SHA256SUMS` if you like.
+
+Or build from source (Rust toolchain, a C compiler, `pkg-config` and D-Bus headers are required; on Fedora that's `gcc pkgconf-pkg-config dbus-devel`, on Debian/Ubuntu `build-essential pkg-config libdbus-1-dev`):
 
 ```sh
 git clone https://github.com/iSkuffed/Skratch
@@ -48,7 +50,7 @@ On first launch a welcome page checks what you already have and sets up the rest
 
 You can reopen it any time with "Run setup again" in the sidebar.
 
-Prebuilt downloads aren't published yet.
+Releases are built by `.github/workflows/release.yml` when a version tag (`v0.1.0`...) is pushed: it tests, builds on Ubuntu 22.04 (so older distributions work) and attaches the AppImage and its checksum to a GitHub Release.
 
 ## Where things live
 

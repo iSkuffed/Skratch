@@ -279,14 +279,21 @@ fn plain_title(title: &str) -> String {
 /// has to be the same once brackets and filler are ignored, and the artist (when the track
 /// has one) has to be among the song's.
 fn netease_ids(results: &Value, duration: f64, artist: &str, title: &str) -> Vec<u64> {
-    let artist = artist.trim().to_lowercase();
+    // "$NOT" and "Not", "A.J." and "AJ": names are compared as letters and digits only
+    let letters = |name: &str| -> String {
+        name.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let artist = letters(artist);
     let title = plain_title(title);
     let by_artist = |song: &Value| {
         artist.is_empty()
             || song["artists"].as_array().is_some_and(|names| {
                 names.iter().filter_map(|a| a["name"].as_str()).any(|name| {
-                    let name = name.trim().to_lowercase();
-                    name.chars().count() >= 3 && (artist.contains(&name) || name.contains(&artist))
+                    let name = letters(name);
+                    name.chars().count() >= 2 && (artist.contains(&name) || name.contains(&artist))
                 })
             })
     };

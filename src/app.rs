@@ -2524,123 +2524,177 @@ impl Skratch {
     fn download_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(10.0);
         ui.heading("Downloads");
-        ui.add_space(12.0);
-        if !self.tools.downloads_ready() {
-            ui.horizontal(|ui| {
-                ui.colored_label(self.accent, "Downloading needs yt-dlp and ffmpeg.");
-                if ui.button("Set up downloads...").clicked() {
-                    self.open_setup(true);
-                }
-            });
-            ui.add_space(8.0);
-        }
-        ui.label("Link");
-        ui.add(
-            egui::TextEdit::singleline(&mut self.download_url)
-                .hint_text("https://...")
-                .desired_width(f32::INFINITY),
+        ui.label(
+            RichText::new("Saves the audio of a link into your music folder, using yt-dlp.")
+                .color(style::CREAM_DIM),
         );
-        ui.add_space(6.0);
-        if self
-            .state
-            .download_source
-            .as_ref()
-            .is_none_or(|path| !self.sources.contains(path))
-        {
-            self.state.download_source = self.sources.first().cloned();
-        }
-        ui.label("Save to music folder");
-        egui::ComboBox::from_id_salt("download-folder")
-            .width(ui.available_width().min(560.0))
-            .selected_text(
-                self.state
+        ui.add_space(14.0);
+        let ready = self.tools.downloads_ready();
+        let accent = self.accent;
+        let card = Frame::new()
+            .fill(style::RAISED.gamma_multiply(0.8))
+            .stroke(egui::Stroke::new(1.0_f32, style::EDGE))
+            .corner_radius(egui::CornerRadius::same(10))
+            .inner_margin(egui::Margin::same(16));
+        ui.scope(|ui| {
+            ui.set_max_width(680.0);
+            if !ready {
+                card.show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.colored_label(accent, "Downloading needs yt-dlp and ffmpeg.");
+                        if ui.button("Set up downloads...").clicked() {
+                            self.open_setup(true);
+                        }
+                    });
+                });
+                ui.add_space(10.0);
+            }
+            card.show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new("Link").strong());
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.download_url)
+                        .hint_text("https://www.youtube.com/watch?v=...")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(2.0);
+                ui.add_space(4.0);
+                let dim = |text: &str| RichText::new(text).size(12.5).color(style::CREAM_DIM);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.label(dim(
+                        "Works with the sites yt-dlp supports: YouTube, SoundCloud, Bandcamp and many more (",
+                    ));
+                    ui.hyperlink_to(
+                        RichText::new("full list").size(12.5),
+                        "https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md",
+                    );
+                    ui.label(dim(")."));
+                });
+                ui.label(dim(
+                    "Not Spotify, Apple Music or other DRM-protected services, and not links straight to a file.",
+                ));
+                ui.label(dim("A playlist link saves only its first item."));
+                ui.add_space(12.0);
+                if self
+                    .state
                     .download_source
                     .as_ref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "Add a music folder first".into()),
-            )
-            .show_ui(ui, |ui| {
-                for path in &self.sources {
-                    ui.selectable_value(
-                        &mut self.state.download_source,
-                        Some(path.clone()),
-                        path.display().to_string(),
-                    );
+                    .is_none_or(|path| !self.sources.contains(path))
+                {
+                    self.state.download_source = self.sources.first().cloned();
                 }
-            });
-        ui.add_space(6.0);
-        ui.label("Audio format");
-        egui::ComboBox::from_id_salt("download-format")
-            .selected_text(match self.state.download_format {
-                DownloadFormat::Best => "Original audio",
-                DownloadFormat::Mp3 => "MP3",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut self.state.download_format,
-                    DownloadFormat::Best,
-                    "Original audio",
+                egui::Grid::new("download-options")
+                    .num_columns(2)
+                    .spacing([14.0, 10.0])
+                    .show(ui, |ui| {
+                        ui.label("Save to");
+                        egui::ComboBox::from_id_salt("download-folder")
+                            .width(ui.available_width().min(480.0))
+                            .selected_text(
+                                self.state
+                                    .download_source
+                                    .as_ref()
+                                    .map(|path| path.display().to_string())
+                                    .unwrap_or_else(|| "Add a music folder first".into()),
+                            )
+                            .show_ui(ui, |ui| {
+                                for path in &self.sources {
+                                    ui.selectable_value(
+                                        &mut self.state.download_source,
+                                        Some(path.clone()),
+                                        path.display().to_string(),
+                                    );
+                                }
+                            });
+                        ui.end_row();
+                        ui.label("Format");
+                        egui::ComboBox::from_id_salt("download-format")
+                            .selected_text(match self.state.download_format {
+                                DownloadFormat::Best => "Original audio",
+                                DownloadFormat::Mp3 => "MP3",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.state.download_format,
+                                    DownloadFormat::Best,
+                                    "Original audio",
+                                );
+                                ui.selectable_value(
+                                    &mut self.state.download_format,
+                                    DownloadFormat::Mp3,
+                                    "MP3",
+                                );
+                            });
+                        ui.end_row();
+                    });
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Original audio keeps the source's codec. Tags and the cover are included when the site has them.")
+                        .size(12.5)
+                        .color(style::CREAM_DIM),
                 );
-                ui.selectable_value(&mut self.state.download_format, DownloadFormat::Mp3, "MP3");
-            });
-        ui.label(egui::RichText::new("Original audio keeps the source codec where possible. Artwork and tags are included when available.").small().weak());
-        ui.add_space(10.0);
-        let running = self.downloader.is_running();
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    !running
-                        && self.tools.downloads_ready()
+                ui.add_space(14.0);
+                let running = self.downloader.is_running();
+                ui.horizontal(|ui| {
+                    let can = !running
+                        && ready
                         && self.state.download_source.is_some()
-                        && !self.download_url.trim().is_empty(),
-                    egui::Button::new("Download audio"),
-                )
-                .clicked()
-            {
-                let request = DownloadRequest {
-                    url: self.download_url.trim().to_owned(),
-                    destination: self.state.download_source.clone().unwrap(),
-                    format: self.state.download_format,
-                };
-                self.download_log.clear();
-                match self.downloader.start(request) {
-                    Ok(()) => self.download_status = "Starting download...".into(),
-                    Err(e) => self.download_status = format!("Cannot start download: {e:#}"),
-                }
-            }
-            if ui
-                .add_enabled(running, egui::Button::new("Cancel"))
-                .clicked()
-            {
-                self.downloader.cancel();
-                self.download_status = "Cancelling...".into();
-            }
-            if running {
-                ui.spinner();
-            }
-        });
-        ui.add_space(12.0);
-        if !self.download_status.is_empty() {
-            ui.label(&self.download_status);
-        }
-        ui.label(
-            egui::RichText::new(
-                "One item per link. Completed downloads appear in the library automatically.",
-            )
-            .small()
-            .weak(),
-        );
-        ui.add_space(8.0);
-        egui::CollapsingHeader::new("Download details").show(ui, |ui| {
-            style::scroll()
-                .id_salt("download-log")
-                .max_height(260.0)
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    for line in &self.download_log {
-                        ui.label(egui::RichText::new(line).monospace().small());
+                        && !self.download_url.trim().is_empty();
+                    if ui
+                        .add_enabled(can, egui::Button::new("Download audio"))
+                        .clicked()
+                    {
+                        let request = DownloadRequest {
+                            url: self.download_url.trim().to_owned(),
+                            destination: self.state.download_source.clone().unwrap(),
+                            format: self.state.download_format,
+                        };
+                        self.download_log.clear();
+                        match self.downloader.start(request) {
+                            Ok(()) => self.download_status = "Starting download...".into(),
+                            Err(e) => {
+                                self.download_status = format!("Cannot start download: {e:#}")
+                            }
+                        }
+                    }
+                    if ui
+                        .add_enabled(running, egui::Button::new("Cancel"))
+                        .clicked()
+                    {
+                        self.downloader.cancel();
+                        self.download_status = "Cancelling...".into();
+                    }
+                    if running {
+                        ui.spinner();
                     }
                 });
+            });
+            if !self.download_status.is_empty() {
+                ui.add_space(10.0);
+                card.show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.add(egui::Label::new(&self.download_status).wrap());
+                    ui.label(
+                        RichText::new("Finished downloads appear in the library by themselves.")
+                            .small()
+                            .color(style::CREAM_DIM),
+                    );
+                });
+            }
+            ui.add_space(8.0);
+            egui::CollapsingHeader::new("Download details").show(ui, |ui| {
+                style::scroll()
+                    .id_salt("download-log")
+                    .max_height(260.0)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for line in &self.download_log {
+                            ui.label(egui::RichText::new(line).monospace().small());
+                        }
+                    });
+            });
         });
     }
 
@@ -2654,15 +2708,15 @@ impl Skratch {
             .map(|i| &self.tracks[*i])
         {
             let artist = display(&track.album_artist, &track.artist);
-            let key = (!track.album.is_empty())
-                .then(|| (artist.to_lowercase(), track.album.to_lowercase()));
+            let real = !skratch::suggest::placeholder_album(&track.album);
+            let key = real.then(|| (artist.to_lowercase(), track.album.to_lowercase()));
             if key.is_some()
                 && let Some(at) = keys.iter().position(|k| *k == key)
             {
                 items[at].ids.push(track.id);
                 continue;
             }
-            let query = if track.album.is_empty() {
+            let query = if !real {
                 track
                     .title
                     .split(['(', '['])

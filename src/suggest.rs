@@ -94,12 +94,9 @@ impl Choice {
     }
 }
 
-/// Whether the song's own album tag can be believed enough to look a cover up by it: not a
-/// placeholder like "Unreleased" or "Unknown", and filled in on purpose (a year or a track
-/// number came with it). Otherwise tags are fixed first, and the cover follows from them.
-pub fn trusted_album(track: &Track) -> bool {
-    let plain: String = track
-        .album
+/// Whether an album name stands for no album at all ("Unreleased", "Singles", "Unknown"...).
+pub fn placeholder_album(album: &str) -> bool {
+    let plain: String = album
         .chars()
         .filter(|c| c.is_alphanumeric())
         .flat_map(char::to_lowercase)
@@ -118,9 +115,14 @@ pub fn trusted_album(track: &Track) -> bool {
         "none",
         "na",
     ];
-    !plain.is_empty()
-        && !PLACEHOLDERS.contains(&plain.as_str())
-        && (track.year.is_some() || track.track_number.is_some())
+    plain.is_empty() || PLACEHOLDERS.contains(&plain.as_str())
+}
+
+/// Whether the song's own album tag can be believed enough to look a cover up by it: not a
+/// placeholder, and filled in on purpose (a year or a track number came with it). Otherwise
+/// tags are fixed first, and the cover follows from them.
+pub fn trusted_album(track: &Track) -> bool {
+    !placeholder_album(&track.album) && (track.year.is_some() || track.track_number.is_some())
 }
 
 /// A suggestion the user took, kept so it can be undone.
@@ -245,18 +247,40 @@ fn same_artist(have: &str, found: &str) -> bool {
     have.is_empty() || found.is_empty() || have.contains(&found) || found.contains(&have)
 }
 
-/// The first cover found that is for this album (iTunes and MusicBrainz also return other albums
-/// by the artist, and a wrong cover is worse than none).
-fn cover_for(list: Vec<Candidate>, album: &str) -> Option<Candidate> {
+/// The first cover found that is for this album by this artist (iTunes and MusicBrainz also
+/// return other albums by the artist, and karaoke and tribute albums of the same title by
+/// someone else; a wrong cover is worse than none). A label reads "Artist - Album (year)".
+fn cover_for(list: Vec<Candidate>, artist: &str, album: &str) -> Option<Candidate> {
     let plain = |text: &str| -> String {
         text.chars()
             .filter(|c| c.is_alphanumeric())
             .flat_map(char::to_lowercase)
             .collect()
     };
-    let album = plain(album);
-    list.into_iter()
-        .find(|c| !album.is_empty() && plain(&c.label).contains(&album))
+    const IMITATIONS: [&str; 7] = [
+        "instrumental",
+        "karaoke",
+        "tribute",
+        "originallyperformed",
+        "madefamous",
+        "backingtrack",
+        "cover version",
+    ];
+    let album_plain = plain(album);
+    let imitation = |text: &str| {
+        let text = plain(text);
+        IMITATIONS
+            .iter()
+            .map(|word| plain(word))
+            .any(|word| text.contains(&word))
+    };
+    list.into_iter().find(|c| {
+        let (by, title) = c.label.split_once(" - ").unwrap_or(("", &c.label));
+        !album_plain.is_empty()
+            && plain(title).contains(&album_plain)
+            && (by.is_empty() || plain(by).contains("various") || same_artist(artist, by))
+            && (imitation(album) || !imitation(&c.label))
+    })
 }
 
 /// Puts the album's first year on a match (a reissue's own year would be wrong). A track number
@@ -328,7 +352,7 @@ pub fn find(track: &Track) -> Result<Vec<Choice>> {
             };
             patient(|| online::search(artist, album))
                 .ok()
-                .and_then(|list| cover_for(list, album))
+                .and_then(|list| cover_for(list, artist, album))
         } else {
             None
         };
@@ -351,7 +375,7 @@ pub fn find(track: &Track) -> Result<Vec<Choice>> {
         let cover = if album_known {
             patient(|| online::search(&track.artist, &track.album))
                 .ok()
-                .and_then(|list| cover_for(list, &track.album))
+                .and_then(|list| cover_for(list, &track.artist, &track.album))
         } else {
             patient(|| online::song_art(&track.artist, &track.title))
                 .ok()
@@ -436,12 +460,31 @@ mod tests {
             candidate("Queen - A Night At The Opera (1975)"),
         ];
         assert_eq!(
-            cover_for(list.clone(), "A Night at the Opera")
+            cover_for(list.clone(), "Queen", "A Night at the Opera")
                 .unwrap()
                 .label,
             "Queen - A Night At The Opera (1975)"
         );
-        assert!(cover_for(list, "Jazz").is_none());
+        assert!(cover_for(list, "Queen", "Jazz").is_none());
+    }
+
+    #[test]
+    fn a_karaoke_album_by_someone_else_is_not_the_cover() {
+        let candidate = |label: &str| Candidate {
+            label: label.into(),
+            source: "iTunes".to_owned(),
+            thumb: String::new(),
+            full: String::new(),
+        };
+        let list = vec![
+            candidate("3 Dope Brothas - Drip Too Hard (Originally Performed by Lil Baby) [Instrumental]"),
+            candidate("Lil Baby - Drip Too Hard - Single (2018)"),
+        ];
+        let found = cover_for(list, "Lil Baby", "Drip Too Hard").unwrap();
+        assert!(found.label.starts_with("Lil Baby"));
+        let only = vec![candidate("Queen - Jazz (Karaoke Version)")];
+        assert!(cover_for(only.clone(), "Queen", "Jazz").is_none());
+        assert!(cover_for(only, "Queen", "Jazz (Karaoke Version)").is_some());
     }
 
     #[test]
