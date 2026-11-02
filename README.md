@@ -113,8 +113,6 @@ Controls that belong to a panel stay in the same place whatever the content is; 
 | `src/service.rs` | Background scans and folder watching |
 | `src/media.rs`, `src/queue.rs` | MPRIS, playback order |
 
-[RoadMap.html](RoadMap.html) lists what's done and what's planned; it works offline.
-
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE). AIMP was an inspiration; no AIMP code, skins or artwork are included.
