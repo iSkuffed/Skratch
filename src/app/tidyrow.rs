@@ -7,6 +7,8 @@ use skratch::{model::Track, suggest::Choice};
 
 /// Height of a song's card.
 pub(super) const ROW: f32 = 132.0;
+/// Height of a song's card when it only has its cover and details (no list of changes).
+pub(super) const SLIM: f32 = 92.0;
 /// Height of a heading between groups of cards.
 pub(super) const HEAD: f32 = 34.0;
 /// Side of a cover picture.

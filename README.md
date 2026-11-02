@@ -4,6 +4,26 @@ A small, native music player and library for Linux. Your files stay where they a
 
 Skratch has a vinyl theme: a spinning record with a tonearm in the player bar, generated sleeves for tracks without cover art, and an accent colour taken from whatever cover is playing.
 
+## Screenshots
+
+Made with invented songs, in a private test library.
+
+![A tour: tracks, albums, Tidy up and the lyrics page](docs/screenshots/tour.gif)
+
+Synced lyrics follow the song, word by word:
+
+![Lyrics filling in as the song plays](docs/screenshots/lyrics-sync.gif)
+
+| | |
+|---|---|
+| ![Now playing](docs/screenshots/now-playing.png) | ![Lyrics](docs/screenshots/lyrics.png) |
+| ![Albums](docs/screenshots/albums.png) | ![Artists](docs/screenshots/artists.png) |
+| ![Tracks](docs/screenshots/library.png) | ![Play queue](docs/screenshots/queue.png) |
+| ![Downloads](docs/screenshots/downloads.png) | ![Visualizer](docs/screenshots/visualizer.png) |
+| ![Tidy up: suggestions](docs/screenshots/tidy-suggestions.png) | ![Tidy up: unfinished tags](docs/screenshots/tidy-unfinished.png) |
+
+![The visualizer, with the lyrics over it](docs/screenshots/visualizer.gif)
+
 ## Features
 
 - **Library:** album, artist and track views. It scans your folders recursively, watches them for changes, and never copies or moves your music.

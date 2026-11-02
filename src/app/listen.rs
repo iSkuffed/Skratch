@@ -670,7 +670,7 @@ impl Skratch {
             .iter()
             .map(|row| match row {
                 CopyRow::Header(_) => tidyrow::HEAD,
-                CopyRow::Track(..) => tidyrow::ROW,
+                CopyRow::Track(..) => tidyrow::SLIM,
             })
             .collect();
         let total: f32 = heights.iter().sum();
@@ -790,7 +790,7 @@ impl Skratch {
         ui.separator();
         style::scroll().id_salt("tidy-loose").show_rows(
             ui,
-            tidyrow::ROW,
+            tidyrow::SLIM,
             rows.len(),
             |ui, range| {
                 for (i, found) in rows[range].iter().copied() {
@@ -914,7 +914,7 @@ impl Skratch {
         let no_album = note.is_some() && health::problems(&track).contains(&Problem::NoAlbum);
         tidyrow::card(
             ui,
-            tidyrow::ROW,
+            tidyrow::SLIM,
             236.0,
             |ui| {
                 ui.horizontal_top(|ui| {
