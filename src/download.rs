@@ -611,7 +611,9 @@ fn configure_process_group(command: &mut Command) {
 }
 
 #[cfg(not(unix))]
-fn configure_process_group(_command: &mut Command) {}
+fn configure_process_group(command: &mut Command) {
+    crate::tools::hide_window(command);
+}
 
 #[cfg(unix)]
 fn kill_process_group(process_group: i32) {
@@ -624,7 +626,17 @@ fn kill_process_group(process_group: i32) {
 }
 
 #[cfg(not(unix))]
-fn kill_process_group(_process_group: i32) {}
+fn kill_process_group(process_id: i32) {
+    // /T also stops the ffmpeg that yt-dlp started
+    let mut command = Command::new("taskkill");
+    crate::tools::hide_window(&mut command);
+    let _ = command
+        .args(["/PID", &process_id.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
 
 #[cfg(test)]
 mod tests {

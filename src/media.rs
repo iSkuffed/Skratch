@@ -51,13 +51,17 @@ struct PlaybackSnapshot {
 }
 
 impl DesktopControls {
-    pub fn new(wake: Arc<dyn Fn() + Send + Sync>) -> Result<Self> {
+    /// `hwnd` is the app window, which Windows wants for its media overlay (unused on Linux).
+    pub fn new(
+        wake: Arc<dyn Fn() + Send + Sync>,
+        hwnd: Option<*mut std::ffi::c_void>,
+    ) -> Result<Self> {
         let mut controls = MediaControls::new(PlatformConfig {
             dbus_name: "skratch",
             display_name: "Skratch",
-            hwnd: None,
+            hwnd,
         })
-        .context("initialize Linux desktop media controls")?;
+        .context("initialize desktop media controls")?;
         let (sender, events) = mpsc::channel();
         controls
             .attach(move |event| {
@@ -136,6 +140,8 @@ impl DesktopControls {
             .last_volume
             .is_none_or(|last| (last - volume).abs() >= 0.001)
         {
+            // only MPRIS has a volume to publish
+            #[cfg(target_os = "linux")]
             self.controls
                 .set_volume(volume / 100.0)
                 .context("publish desktop media volume")?;

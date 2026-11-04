@@ -10,10 +10,9 @@ use lofty::{
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use std::{
     collections::{BTreeMap, HashSet},
-    ffi::{CString, OsStr},
+    ffi::OsStr,
     fs,
     io::{Cursor, Write},
-    os::{raw::c_int, unix::ffi::OsStrExt},
     path::{Component, Path, PathBuf},
     time::UNIX_EPOCH,
 };
@@ -1353,7 +1352,23 @@ fn push_warning(report: &mut ScanReport, warning: String) {
     }
 }
 
+#[cfg(windows)]
 fn rename_noreplace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+    let wide = |path: &Path| -> Vec<u16> { path.as_os_str().encode_wide().chain([0]).collect() };
+    let (source, destination) = (wide(source), wide(destination));
+    // without MOVEFILE_REPLACE_EXISTING, Windows refuses to rename onto a file that is there
+    if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0) } != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(unix)]
+fn rename_noreplace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::{ffi::CString, os::raw::c_int, os::unix::ffi::OsStrExt};
     const AT_FDCWD: c_int = -100;
     const RENAME_NOREPLACE: u32 = 1;
     unsafe extern "C" {

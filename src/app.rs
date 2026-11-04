@@ -352,7 +352,7 @@ impl Skratch {
         if state.tag_pattern.trim().is_empty() {
             state.tag_pattern = tagparse::DEFAULT_PATTERN.into();
         }
-        let desktop = match DesktopControls::new(wake.clone()) {
+        let desktop = match DesktopControls::new(wake.clone(), window_handle(cc)) {
             Ok(controls) => Some(controls),
             Err(e) => {
                 messages.push(format!("Desktop media controls unavailable: {e:#}"));
@@ -3238,4 +3238,19 @@ pub(crate) fn time(seconds: f64) -> String {
     } else {
         format!("{}:{:02}", seconds / 60, seconds % 60)
     }
+}
+
+/// The native window handle Windows needs for media keys and the volume overlay.
+#[cfg(windows)]
+fn window_handle(cc: &eframe::CreationContext<'_>) -> Option<*mut std::ffi::c_void> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match cc.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as *mut _),
+        _ => None,
+    }
+}
+
+#[cfg(not(windows))]
+fn window_handle(_: &eframe::CreationContext<'_>) -> Option<*mut std::ffi::c_void> {
+    None
 }

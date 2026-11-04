@@ -34,3 +34,9 @@ strip = true
 
 [features]
 screenshot = ["eframe/__screenshot"]
+
+[target."cfg(windows)".dependencies]
+raw-window-handle = "0.6"
+sevenz-rust2 = "0.24.2"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading"] }
+zip = { version = "9.3.0", default-features = false, features = ["deflate"] }

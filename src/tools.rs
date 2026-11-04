@@ -3,6 +3,7 @@
 //! Everything runs on a background thread and only ever starts from a button.
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
+#[cfg_attr(windows, allow(unused_imports))] // the Linux-only installers use these
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
@@ -52,15 +53,53 @@ impl Status {
     }
 }
 
+/// What a program's file name ends with on this system.
+#[cfg(windows)]
+const EXE: &str = ".exe";
+#[cfg(not(windows))]
+const EXE: &str = "";
+
 pub fn on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
+        .map(|dir| dir.join(format!("{name}{EXE}")))
         .find(|candidate| candidate.is_file())
 }
 
 fn managed_yt_dlp(data_dir: &Path) -> PathBuf {
-    data_dir.join("bin").join("yt-dlp")
+    data_dir.join("bin").join(format!("yt-dlp{EXE}"))
+}
+
+/// The mpv Skratch fetched itself (Windows has no package manager to install it with).
+fn managed_mpv(data_dir: &Path) -> PathBuf {
+    data_dir.join("mpv").join(format!("mpv{EXE}"))
+}
+
+static DATA_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Tells the player where Skratch keeps its own tools; called once at startup.
+pub fn remember_data_dir(data_dir: &Path) {
+    let _ = DATA_DIR.set(data_dir.to_owned());
+}
+
+/// What to run to start mpv: Skratch's own copy when it has one, otherwise whatever is on PATH.
+pub fn mpv_program() -> PathBuf {
+    DATA_DIR
+        .get()
+        .map(|dir| managed_mpv(dir))
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from("mpv"))
+}
+
+/// Keeps a console window from flashing up when a helper program starts (Windows).
+pub fn hide_window(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    #[cfg(not(windows))]
+    let _ = command;
 }
 
 fn managed_ffmpeg(data_dir: &Path) -> PathBuf {
@@ -69,7 +108,7 @@ fn managed_ffmpeg(data_dir: &Path) -> PathBuf {
 
 pub fn detect(data_dir: &Path) -> Status {
     let mut status = Status {
-        mpv: on_path("mpv").is_some(),
+        mpv: on_path("mpv").is_some() || managed_mpv(data_dir).is_file(),
         ..Status::default()
     };
     let own = managed_yt_dlp(data_dir);
@@ -82,7 +121,9 @@ pub fn detect(data_dir: &Path) -> Status {
     let bin = managed_ffmpeg(data_dir).join("bin");
     if on_path("ffmpeg").is_some() && on_path("ffprobe").is_some() {
         status.ffmpeg = true;
-    } else if bin.join("ffmpeg").is_file() && bin.join("ffprobe").is_file() {
+    } else if bin.join(format!("ffmpeg{EXE}")).is_file()
+        && bin.join(format!("ffprobe{EXE}")).is_file()
+    {
         status.ffmpeg = true;
         status.ffmpeg_dir = Some(bin);
     }
@@ -114,6 +155,12 @@ pub fn can_ask_for_password() -> bool {
     on_path("pkexec").is_some()
 }
 
+/// Whether the "Install mpv" button can work here: Windows fetches mpv itself, Linux needs a
+/// known package manager and a way to ask for the password.
+pub fn can_install_mpv() -> bool {
+    cfg!(windows) || (mpv_shell_line().is_some() && can_ask_for_password())
+}
+
 /// Starts the steps in order on a background thread.
 pub fn run(
     data_dir: PathBuf,
@@ -130,7 +177,7 @@ pub fn run(
             let result = {
                 let mut log = |line: String| send(Msg::Log(line));
                 match step {
-                    Step::Mpv => install_mpv(&mut log),
+                    Step::Mpv => install_mpv(&data_dir, &mut log),
                     Step::YtDlp => install_yt_dlp(&data_dir, &mut log),
                     Step::Ffmpeg => install_ffmpeg(&data_dir, &mut log),
                     Step::UpdateYtDlp => update_yt_dlp(&data_dir, &mut log),
@@ -145,7 +192,72 @@ pub fn run(
     });
 }
 
-fn install_mpv(log: &mut dyn FnMut(String)) -> Result<()> {
+#[cfg(windows)]
+fn install_mpv(data_dir: &Path, log: &mut dyn FnMut(String)) -> Result<()> {
+    // the mpv builds Windows users usually take; GitHub lists a SHA-256 for every file
+    const RELEASE: &str =
+        "https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest";
+    log("Looking up the latest mpv...".to_owned());
+    let text = agent()
+        .get(RELEASE)
+        .header("Accept", "application/vnd.github+json")
+        .call()?
+        .body_mut()
+        .with_config()
+        .limit(8 * 1024 * 1024)
+        .read_to_string()?;
+    let (url, want) = mpv_asset(&text)?;
+    let archive = data_dir.join(".mpv.part.7z");
+    let fresh = data_dir.join(".mpv.new");
+    let result = (|| {
+        let got = download(&url, &archive, "mpv", log)?;
+        ensure!(got == want, "mpv download failed its checksum");
+        log("Unpacking mpv...".to_owned());
+        let _ = fs::remove_dir_all(&fresh);
+        sevenz_rust2::decompress_file(&archive, &fresh).context("unpack mpv")?;
+        let mut check = Command::new(fresh.join("mpv.exe"));
+        hide_window(&mut check);
+        let ok = check
+            .arg("--version")
+            .stdin(Stdio::null())
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        ensure!(ok, "the downloaded mpv does not run on this system");
+        let target = data_dir.join("mpv");
+        let _ = fs::remove_dir_all(&target);
+        fs::rename(&fresh, &target).context("put mpv in place")
+    })();
+    let _ = fs::remove_file(&archive);
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&fresh);
+    }
+    result
+}
+
+/// The plain 64-bit mpv build in a GitHub release listing, with its SHA-256.
+#[cfg(windows)]
+fn mpv_asset(release_json: &str) -> Result<(String, String)> {
+    let release: serde_json::Value = serde_json::from_str(release_json)?;
+    release["assets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|asset| {
+            let name = asset["name"].as_str()?;
+            // not the -dev, -v3 (needs newer CPUs) or other-architecture files
+            let plain = name.starts_with("mpv-x86_64-")
+                && !name.starts_with("mpv-x86_64-v3")
+                && name.ends_with(".7z");
+            let url = asset["browser_download_url"].as_str()?;
+            let hash = asset["digest"].as_str()?.strip_prefix("sha256:")?;
+            plain.then(|| (url.to_owned(), hash.to_ascii_lowercase()))
+        })
+        .context("no mpv download with a checksum found for this system")
+}
+
+#[cfg(not(windows))]
+fn install_mpv(_data_dir: &Path, log: &mut dyn FnMut(String)) -> Result<()> {
     let words = mpv_command(&|name| on_path(name).is_some())
         .context("no known package manager (dnf, apt, pacman or zypper) found")?;
     ensure!(can_ask_for_password(), "pkexec is not available");
@@ -178,6 +290,7 @@ fn install_mpv(log: &mut dyn FnMut(String)) -> Result<()> {
 
 fn asset_names() -> Result<(&'static str, &'static str)> {
     match std::env::consts::ARCH {
+        "x86_64" if cfg!(windows) => Ok(("yt-dlp.exe", "ffmpeg-master-latest-win64-gpl-shared.zip")),
         "x86_64" => Ok((
             "yt-dlp_linux",
             "ffmpeg-master-latest-linux64-gpl-shared.tar.xz",
@@ -274,8 +387,11 @@ fn install_yt_dlp(data_dir: &Path, log: &mut dyn FnMut(String)) -> Result<()> {
         let want = fetch_sums(YT_DLP_BASE, "SHA2-256SUMS", asset)?;
         let got = download(&format!("{YT_DLP_BASE}/{asset}"), &part, "yt-dlp", log)?;
         ensure!(got == want, "yt-dlp download failed its checksum");
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&part, fs::Permissions::from_mode(0o755))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&part, fs::Permissions::from_mode(0o755))?;
+        }
         fs::rename(&part, managed_yt_dlp(data_dir)).context("put yt-dlp in place")
     })();
     if result.is_err() {
@@ -291,7 +407,9 @@ fn update_yt_dlp(data_dir: &Path, log: &mut dyn FnMut(String)) -> Result<()> {
         "Skratch has no yt-dlp copy of its own to update"
     );
     log("Updating yt-dlp...".to_owned());
-    let output = Command::new(&program)
+    let mut command = Command::new(&program);
+    hide_window(&mut command);
+    let output = command
         .arg("-U")
         .stdin(Stdio::null())
         .output()
@@ -306,7 +424,7 @@ fn update_yt_dlp(data_dir: &Path, log: &mut dyn FnMut(String)) -> Result<()> {
 fn install_ffmpeg(data_dir: &Path, log: &mut dyn FnMut(String)) -> Result<()> {
     let (_, asset) = asset_names()?;
     fs::create_dir_all(data_dir)?;
-    let archive = data_dir.join(".ffmpeg.part.tar.xz");
+    let archive = data_dir.join(".ffmpeg.part.archive");
     let fresh = data_dir.join(".ffmpeg.new");
     let result = (|| {
         log("Checking the ffmpeg checksum...".to_owned());
@@ -317,7 +435,9 @@ fn install_ffmpeg(data_dir: &Path, log: &mut dyn FnMut(String)) -> Result<()> {
         let _ = fs::remove_dir_all(&fresh);
         extract_ffmpeg(&archive, &fresh)?;
         for tool in ["ffmpeg", "ffprobe"] {
-            let ok = Command::new(fresh.join("bin").join(tool))
+            let mut check = Command::new(fresh.join("bin").join(format!("{tool}{EXE}")));
+            hide_window(&mut check);
+            let ok = check
                 .arg("-version")
                 .stdin(Stdio::null())
                 .output()
@@ -336,7 +456,29 @@ fn install_ffmpeg(data_dir: &Path, log: &mut dyn FnMut(String)) -> Result<()> {
     result
 }
 
+/// Unpacks only `bin/` of a .zip with one top-level directory.
+#[cfg(windows)]
+fn extract_ffmpeg(archive: &Path, dest: &Path) -> Result<()> {
+    let mut zip = zip::ZipArchive::new(fs::File::open(archive)?)?;
+    for index in 0..zip.len() {
+        let mut entry = zip.by_index(index)?;
+        let Some(path) = entry.enclosed_name() else {
+            bail!("unsafe path in the downloaded archive");
+        };
+        let parts: Vec<_> = path.components().collect();
+        // parts[0] is the top-level directory
+        if entry.is_dir() || parts.len() != 3 || parts[1].as_os_str() != "bin" {
+            continue;
+        }
+        fs::create_dir_all(dest.join("bin"))?;
+        let mut out = fs::File::create(dest.join("bin").join(parts[2].as_os_str()))?;
+        std::io::copy(&mut entry, &mut out)?;
+    }
+    Ok(())
+}
+
 /// Unpacks only `bin/` and `lib/` of a .tar.xz with one top-level directory.
+#[cfg(not(windows))]
 fn extract_ffmpeg(archive: &Path, dest: &Path) -> Result<()> {
     let file = fs::File::open(archive)?;
     let mut tar = tar::Archive::new(xz2::read::XzDecoder::new(file));
@@ -366,7 +508,46 @@ fn extract_ffmpeg(archive: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn ffmpeg_zip_keeps_only_bin_and_refuses_paths_that_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.zip");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, body) in [
+            ("top/bin/ffmpeg.exe", "exe"),
+            ("top/bin/avcodec.dll", "dll"),
+            ("top/lib/avcodec.lib", "lib"),
+            ("top/LICENSE.txt", "license"),
+        ] {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        let out = dir.path().join("out");
+        extract_ffmpeg(&archive, &out).unwrap();
+        assert_eq!(fs::read(out.join("bin/ffmpeg.exe")).unwrap(), b"exe");
+        assert!(out.join("bin/avcodec.dll").is_file());
+        assert!(!out.join("lib").exists());
+    }
+
+    #[test]
+    fn the_plain_mpv_build_is_chosen_with_its_checksum() {
+        let json = r#"{"assets":[
+          {"name":"mpv-dev-x86_64-1.7z","browser_download_url":"u0","digest":"sha256:00"},
+          {"name":"mpv-x86_64-v3-1.7z","browser_download_url":"u1","digest":"sha256:11"},
+          {"name":"mpv-aarch64-1.7z","browser_download_url":"u2","digest":"sha256:22"},
+          {"name":"mpv-x86_64-1.7z","browser_download_url":"u3","digest":"sha256:AB"}]}"#;
+        assert_eq!(mpv_asset(json).unwrap(), ("u3".into(), "ab".into()));
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

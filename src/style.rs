@@ -46,10 +46,14 @@ pub fn display(size: f32) -> FontId {
 /// A font on this system that covers Japanese, Korean and Chinese, which the bundled faces
 /// and egui's own lack; titles in those scripts would show as empty boxes without it.
 fn cjk_fallback() -> Option<egui::FontData> {
-    let found = std::process::Command::new("fc-match")
-        .args(["-f", "%{file}|%{index}", "sans-serif:lang=ja"])
-        .output()
-        .ok()
+    let found = (!cfg!(windows))
+        .then(|| {
+            std::process::Command::new("fc-match")
+                .args(["-f", "%{file}|%{index}", "sans-serif:lang=ja"])
+                .output()
+                .ok()
+        })
+        .flatten()
         .and_then(|out| String::from_utf8(out.stdout).ok())
         .and_then(|text| {
             let (file, index) = text.split_once('|')?;
@@ -63,6 +67,8 @@ fn cjk_fallback() -> Option<egui::FontData> {
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
             "C:\\Windows\\Fonts\\YuGothR.ttc",
+            "C:\\Windows\\Fonts\\msgothic.ttc",
+            "C:\\Windows\\Fonts\\msyh.ttc",
             "/System/Library/Fonts/Hiragino Sans GB.ttc",
         ]
         .iter()
@@ -749,8 +755,18 @@ pub fn title_bar(
         .on_hover_cursor(CursorIcon::PointingHand)
         .on_hover_text(HOME_URL);
     if link.clicked() {
-        // Linux-only app; xdg-open hands the link to the default browser
-        let _ = std::process::Command::new("xdg-open").arg(HOME_URL).spawn();
+        // the desktop's own way of opening a link in the default browser
+        let mut open = if cfg!(windows) {
+            let mut open = std::process::Command::new("rundll32");
+            open.args(["url.dll,FileProtocolHandler", HOME_URL]);
+            open
+        } else {
+            let mut open = std::process::Command::new("xdg-open");
+            open.arg(HOME_URL);
+            open
+        };
+        skratch::tools::hide_window(&mut open);
+        let _ = open.spawn();
     }
     wordmark(
         &p,

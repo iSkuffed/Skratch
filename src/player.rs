@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::net::Shutdown;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -12,6 +13,8 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryS
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+#[cfg(windows)]
+use winpipe::WinPipe as UnixStream;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
@@ -98,15 +101,22 @@ impl Player {
             .prefix("skratch-mpv-")
             .tempdir()
             .context("create private mpv IPC directory")?;
+        #[cfg(unix)]
         let socket_path = socket_dir.path().join("ipc.sock");
+        // Windows has named pipes instead of socket files; the folder name is unique already.
+        #[cfg(windows)]
+        let socket_path = std::path::PathBuf::from(format!(
+            r"\\.\pipe\{}",
+            socket_dir.path().file_name().unwrap_or_default().to_string_lossy()
+        ));
         let socket_arg = socket_path
             .to_str()
             .ok_or_else(|| anyhow!("mpv IPC socket path is not valid UTF-8"))?;
-        if socket_arg.len() >= 108 {
+        if cfg!(unix) && socket_arg.len() >= 108 {
             bail!("mpv IPC socket path is too long for a Unix socket");
         }
 
-        let mut command = Command::new("mpv");
+        let mut command = Command::new(crate::tools::mpv_program());
         command
             .arg("--idle=yes")
             .arg("--no-video")
@@ -124,12 +134,15 @@ impl Player {
             command.arg("--ao=null");
         }
         die_with_parent(&mut command);
+        crate::tools::hide_window(&mut command);
         let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .context("start mpv (make sure mpv is installed)")?;
+        #[cfg(windows)]
+        winpipe::bind_to_this_process(&child);
 
         let socket = match wait_for_socket(&socket_path, &mut child) {
             Ok(socket) => socket,
@@ -392,8 +405,109 @@ fn die_with_parent(command: &mut Command) {
     }
 }
 
+// Windows ties mpv to Skratch with a job object, after it has started (`bind_to_this_process`).
 #[cfg(not(target_os = "linux"))]
 fn die_with_parent(_command: &mut Command) {}
+
+/// mpv's JSON IPC on Windows: a named pipe, opened like a file.
+#[cfg(windows)]
+mod winpipe {
+    use std::fs::{File, OpenOptions};
+    use std::io::{self, Read, Write};
+    use std::net::Shutdown;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::path::Path;
+    use std::process::Child;
+    use std::time::Duration;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+    use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+
+    pub struct WinPipe(File);
+
+    impl WinPipe {
+        pub fn connect(path: &Path) -> io::Result<Self> {
+            OpenOptions::new().read(true).write(true).open(path).map(Self)
+        }
+        pub fn try_clone(&self) -> io::Result<Self> {
+            self.0.try_clone().map(Self)
+        }
+        // writes to a pipe mpv is reading do not stall
+        pub fn set_write_timeout(&self, _: Option<Duration>) -> io::Result<()> {
+            Ok(())
+        }
+        // dropping the player kills mpv, which ends the reader
+        pub fn shutdown(&self, _: Shutdown) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Read for WinPipe {
+        /// A blocked read on a Windows pipe handle holds up every write on it, so only read
+        /// once PeekNamedPipe says something is there.
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            loop {
+                let mut available = 0u32;
+                // SAFETY: the handle is open for the life of `self`; only the byte count is asked for.
+                let ok = unsafe {
+                    PeekNamedPipe(
+                        self.0.as_raw_handle() as HANDLE,
+                        std::ptr::null_mut(),
+                        0,
+                        std::ptr::null_mut(),
+                        &mut available,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if ok == 0 {
+                    // the other end is gone: end of stream
+                    return Ok(0);
+                }
+                if available > 0 {
+                    return self.0.read(buf);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    impl Write for WinPipe {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.write(buf)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.0.flush()
+        }
+    }
+
+    /// Has Windows end mpv when Skratch ends, however it ends: the job closes with the last
+    /// handle to it, which dies with this process.
+    pub fn bind_to_this_process(child: &Child) {
+        // SAFETY: plain Win32 calls on handles owned here; the job handle is leaked on purpose
+        // so it lives as long as the process.
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let set = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if set == 0 || AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0 {
+                drop(OwnedHandle::from_raw_handle(job as _));
+            }
+        }
+    }
+}
 
 fn wait_for_socket(path: &Path, child: &mut Child) -> Result<UnixStream> {
     let deadline = Instant::now() + CONNECT_TIMEOUT;

@@ -1,3 +1,6 @@
+// no console window behind the app on Windows
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod app;
 mod artwork;
 mod service;
@@ -48,6 +51,7 @@ fn main() -> anyhow::Result<()> {
             .to_path_buf()
     };
     std::fs::create_dir_all(&data_dir)?;
+    skratch::tools::remember_data_dir(&data_dir);
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1360.0, 860.0])

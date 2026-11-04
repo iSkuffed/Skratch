@@ -225,7 +225,7 @@ fn mpris_events_on_isolated_dbus() {
         artwork: Some(artwork_path),
         ..Track::default()
     };
-    let mut controls = DesktopControls::new(Arc::new(|| {})).unwrap();
+    let mut controls = DesktopControls::new(Arc::new(|| {}), None).unwrap();
     controls.update(Some(&track), true, 12.5, 42.0).unwrap();
 
     let metadata = wait_for_mpris_value(

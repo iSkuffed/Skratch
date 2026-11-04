@@ -196,10 +196,14 @@ impl Skratch {
             ui.label("Skratch plays audio through mpv, and it isn't installed yet.");
             let line = tools::mpv_shell_line();
             ui.horizontal(|ui| {
-                let can = line.is_some() && tools::can_ask_for_password() && !busy;
+                let can = tools::can_install_mpv() && !busy;
                 if ui
                     .add_enabled(can, egui::Button::new("Install mpv"))
-                    .on_hover_text("Your system asks for your password. Skratch never sees it.")
+                    .on_hover_text(if cfg!(windows) {
+                        "Downloads mpv into Skratch's own folder. Nothing else on your PC changes."
+                    } else {
+                        "Your system asks for your password. Skratch never sees it."
+                    })
                     .clicked()
                 {
                     self.start_job(vec![Step::Mpv], false);
@@ -225,6 +229,7 @@ impl Skratch {
                         }
                     });
                 }
+                None if cfg!(windows) => {}
                 None => {
                     ui.label(
                         RichText::new("Install mpv with your distribution's package manager, then press Check again.")

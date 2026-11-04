@@ -1,6 +1,6 @@
 name: Release
 
-# Builds the AppImage. Pushing a tag like v0.1.0 also publishes it as a GitHub Release;
+# Builds the AppImage and the Windows zip. Pushing a tag like v0.1.0 also publishes it as a GitHub Release;
 # "Run workflow" on the Actions tab builds one without publishing, to try it out.
 on:
   push:
@@ -60,4 +60,47 @@ jobs:
           files: |
             Skratch-*.AppImage
             SHA256SUMS
+          generate_release_notes: true
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --release --locked --lib
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Make the zip
+        run: |
+          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          mkdir Skratch
+          cp target/release/skratch.exe Skratch/Skratch.exe
+          cp LICENSE Skratch/
+          zip="Skratch-${version}-windows-x86_64.zip"
+          powershell -NoProfile -Command "Compress-Archive -Path Skratch -DestinationPath '$zip'"
+          sha256sum "$zip" > SHA256SUMS-windows
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Skratch-Windows
+          path: |
+            Skratch-*-windows-x86_64.zip
+            SHA256SUMS-windows
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Skratch-*-windows-x86_64.zip
+            SHA256SUMS-windows
           generate_release_notes: true
