@@ -638,7 +638,7 @@ fn kill_process_group(process_id: i32) {
         .status();
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))] // the fakes are shell scripts
 mod tests {
     use super::*;
     use std::{
