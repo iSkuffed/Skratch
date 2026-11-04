@@ -86,7 +86,7 @@ jobs:
           cp target/release/skratch.exe Skratch/Skratch.exe
           cp LICENSE Skratch/
           zip="Skratch-${version}-windows-x86_64.zip"
-          powershell -NoProfile -Command "Compress-Archive -Path Skratch -DestinationPath '$zip'"
+          7z a -tzip "$zip" Skratch
           sha256sum "$zip" > SHA256SUMS-windows
 
       - uses: actions/upload-artifact@v4
