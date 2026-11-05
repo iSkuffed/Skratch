@@ -9,6 +9,8 @@ mod style;
 
 use std::path::PathBuf;
 
+// On Windows the icon comes from the exe itself (see build.rs), which has every size in it.
+#[cfg(not(windows))]
 fn window_icon() -> eframe::egui::IconData {
     let icon = image::load_from_memory(include_bytes!("../assets/icon.png"))
         .expect("bundled icon decodes")
@@ -52,14 +54,16 @@ fn main() -> anyhow::Result<()> {
     };
     std::fs::create_dir_all(&data_dir)?;
     skratch::tools::remember_data_dir(&data_dir);
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_inner_size([1360.0, 860.0])
+        .with_min_inner_size([900.0, 600.0])
+        .with_app_id("skratch")
+        .with_decorations(false)
+        .with_transparent(true);
+    #[cfg(not(windows))]
+    let viewport = viewport.with_icon(window_icon());
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1360.0, 860.0])
-            .with_min_inner_size([900.0, 600.0])
-            .with_app_id("skratch")
-            .with_icon(window_icon())
-            .with_decorations(false)
-            .with_transparent(true),
+        viewport,
         renderer: eframe::Renderer::Glow,
         vsync: true,
         ..Default::default()

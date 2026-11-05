@@ -1,6 +1,6 @@
 # Skratch
 
-A small, native music player and library for Linux. Your files stay where they are, the app is one Rust binary (no webview), and playback is handled by `mpv`.
+A small, native music player and library for Linux and Windows. Your files stay where they are, the app is one Rust binary (no webview), and playback is handled by `mpv`.
 
 Skratch has a vinyl theme: a spinning record with a tonearm in the player bar, generated sleeves for tracks without cover art, and an accent colour taken from whatever cover is playing.
 
@@ -53,6 +53,8 @@ Skratch looks things up on these services, only when you ask or have switched it
 
 **AppImage (Linux, x86_64):** download `Skratch-<version>-x86_64.AppImage` from the [Releases](https://github.com/iSkuffed/Skratch/releases) page, make it executable (`chmod +x Skratch-*.AppImage`) and run it. It holds only Skratch; the welcome page below sets up the rest. Check the download against `SHA256SUMS` if you like.
 
+**Windows (64-bit, early):** download `Skratch-<version>-windows-x86_64.zip` from the same page, unzip it and run `Skratch.exe`. The exe isn't code-signed yet, so Windows SmartScreen may warn: choose More info, then Run anyway. The Windows build has had less testing than the Linux one; please open an issue if something is off.
+
 Or build from source (Rust toolchain, a C compiler, `pkg-config` and D-Bus headers are required; on Fedora that's `gcc pkgconf-pkg-config dbus-devel`, on Debian/Ubuntu `build-essential pkg-config libdbus-1-dev`):
 
 ```sh
@@ -65,12 +67,12 @@ cargo build --release
 On first launch a welcome page checks what you already have and sets up the rest:
 
 - **Music folder:** pick where your music lives.
-- **mpv** (plays the audio): if it's missing, "Install mpv" runs your package manager (dnf, apt, pacman or zypper) through the desktop's password prompt, so Skratch never sees your password. The exact command is shown too, if you'd rather run it yourself.
+- **mpv** (plays the audio): on Windows, "Install mpv" downloads it into Skratch's own folder (checked against the checksum GitHub lists for it). On Linux, if it's missing, "Install mpv" runs your package manager (dnf, apt, pacman or zypper) through the desktop's password prompt, so Skratch never sees your password. The exact command is shown too, if you'd rather run it yourself.
 - **Downloads (optional):** one checkbox fetches `yt-dlp` (about 40 MB) and `ffmpeg` (about 70 MB, 220 MB unpacked) from their official releases, checks them against the published checksums and keeps them in Skratch's own folder. Nothing is installed system-wide, and tools already on your system are used as they are.
 
 You can reopen it any time with "Run setup again" in the sidebar.
 
-Releases are built by `.github/workflows/release.yml` when a version tag (`v0.1.0`...) is pushed: it tests, builds on Ubuntu 22.04 (so older distributions work) and attaches the AppImage and its checksum to a GitHub Release.
+Releases are built by `.github/workflows/release.yml` when a version tag (`v0.1.0`...) is pushed: it tests, builds the AppImage on Ubuntu 22.04 (so older distributions work) and the Windows zip on Windows, and attaches both with their checksums to a GitHub Release.
 
 ## Where things live
 
